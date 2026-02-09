@@ -18,8 +18,7 @@ from tqdm import tqdm
 from ont_fast5_api.fast5_interface import get_fast5_file
 import torch
 from typing import Dict, Optional, Tuple, Union, Literal, List
-# from ..tokenizers import VQTokenizer
-# from nanopore_signal_tokenizer import KMSTokenizer
+from poregpt.tokenizers.kms_tokenizer import KMSTokenizer
 import json
 import gzip
 
@@ -88,28 +87,22 @@ def fast5_to_word(
     model_path: str,
     fast5_files_dir: str,
     method: Literal['kmeans', 'vq'] = 'kmeans',
-    # kwargs_kmeans: Optional[Dict] = None,
-    # kwargs_vq: Optional[Dict] = None,
     output_dir: str = './',
-):
+) -> Dict:
     """
     Convert raw signals from fast5 files to word sequences using a trained tokenizer model.
     
     Args:
-        window_size (int): Size of the sliding window.
-        stride (int): Stride of the sliding window.
         model_path (str): Path to the trained tokenizer model.
         fast5_files_dir (str): Directory containing fast5 files.
         method (Literal['kmeans', 'vq'], optional): Tokenization method. Defaults to 'kmeans'.
+        output_dir (str, optional): Directory to save the output JSONL.GZ files. Defaults to './'.
+    Returns:
+        Dict: A dictionary containing the sliding window parameters used for tokenization.
     """
     sliding_dict = {}
     if method == 'kmeans':
-        # required = {'window_size', 'stride'}
-        # if not required.issubset(kwargs_kmeans):
-            # raise ValueError("kwargs_kmeans must contain 'window_size' and 'stride'.")
         tokenizer = KMSTokenizer(
-            # window_size=kwargs_kmeans['window_size'], 
-            # stride=kwargs_kmeans['stride'],
             centroids_path=model_path
         )
         sliding_dict['wnidow_size'] = tokenizer.window_size
@@ -125,12 +118,19 @@ def fast5_to_word(
 
     print(sliding_dict)
 
+    # 如果output_dir不存在，则创建它
+    os.makedirs(output_dir, exist_ok=True)
+
     fast5_files = glob.glob(fast5_files_dir + '/*.fast5')
     for fast5_file in tqdm(fast5_files, desc="Processing fast5 files"):
         filename = os.path.basename(fast5_file)
+        if filename[-5:] != 'fast5':
+            print(f"Skipping non-fast5 file: {filename}")
+            continue
+        filename_wo_ext = filename[:-5]  # 去掉.fast5后缀
         tokenizer.tokenize_fast5(
             fast5_path=fast5_file,
-            output_path=f"{output_dir}/{filename}.jsonl.gz"
+            output_path=f"{output_dir}/{filename_wo_ext}.jsonl.gz"
         )
 
     return sliding_dict

@@ -9,4 +9,4 @@
 @Version: v1.0
 '''
 
-from .basecall import *
+from .predict_fast5 import *

@@ -110,7 +110,7 @@ class KMSTokenizer(InterfaceTokenizer):
 
  
     def tokenize_fast5(self, fast5_path: str, output_path:str, nanopore_signal_process_strategy="apple"):
-        print(f"✅ Processing {fast5_path} with strategy{nanopore_signal_process_strategy}")
+        print(f"✅ Processing {fast5_path} with strategy {nanopore_signal_process_strategy}")
         results = []
         with get_fast5_file(fast5_path, mode="r") as f5:
             for read in tqdm(f5.get_reads(), desc=os.path.basename(fast5_path)):

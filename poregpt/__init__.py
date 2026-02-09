@@ -3,4 +3,4 @@
 Top-level package for Nanopore Signal Tokenization.
 """
 
-#from . import fast5_basecall
+#from . import basecall as bc

@@ -13,7 +13,7 @@ import torch
 from ...utils.signal import nanopore_process_signal
 import time
 
-def process_single_fast5(fast5_path, csv_path, model_path, device, nanopore_signal_process_strategy="apple"):
+def process_single_fast5(fast5_path, csv_path, model_path, device, output_dir, nanopore_signal_process_strategy="apple"):
     """
     处理单个 FAST5 文件及其对应的 CSV 文件。
 
@@ -22,6 +22,7 @@ def process_single_fast5(fast5_path, csv_path, model_path, device, nanopore_sign
         csv_path (str): 对应的输入 CSV 文件的路径。
         model_path (str): VQE 模型的路径。
         device (str): 用于 VQE tokenizer 的设备 ('cpu', 'cuda', 'cuda:0', etc.)。
+        output_dir (str): 输出 JSONL.GZ 文件的目标目录。
         nanopore_signal_process_strategy (str): 信号处理策略。
     """
     print(f"📖 正在读取 FAST5: {fast5_path}")
@@ -42,6 +43,10 @@ def process_single_fast5(fast5_path, csv_path, model_path, device, nanopore_sign
         print(f"❌ 未找到 CSV 文件: {csv_path}")
         return
 
+    # 创建输出目录（如果不存在）
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"📁 确保输出目录存在: {output_dir}")
+
     # 读取 CSV 文件
     df = pd.read_csv(csv_path)
     print(f"📊 从 CSV 加载了 {len(df)} 行。")
@@ -55,9 +60,12 @@ def process_single_fast5(fast5_path, csv_path, model_path, device, nanopore_sign
          return # 或者根据需要抛出异常
 
 
-    # 获取输出路径 (基于 FAST5 文件路径，替换扩展名为 .jsonl.gz)
-    output_jsonl_gz_path = os.path.splitext(fast5_path)[0] + '.jsonl.gz'
-    print(f"🔄 正在处理 FAST5: {os.path.basename(fast5_path)} -> {os.path.basename(output_jsonl_gz_path)}")
+    # 获取输出路径 (基于 FAST5 文件路径，替换扩展名为 .jsonl.gz，并放在 output_dir 下)
+    # 使用 Path 以更安全地处理路径
+    fast5_filename_stem = Path(fast5_path).stem # 获取不含扩展名的文件名
+    output_jsonl_gz_path = os.path.join(output_dir, f"{fast5_filename_stem}.jsonl.gz")
+    
+    print(f"🔄 正在处理 FAST5: {os.path.basename(fast5_path)} -> {os.path.basename(output_jsonl_gz_path)} (in {output_dir})")
 
     results_for_this_fast5 = []
 
@@ -157,6 +165,7 @@ def main():
     parser.add_argument('--csv_path', type=str, required=True, help='Path to the corresponding input CSV file.')
     parser.add_argument('--model_path', type=str, required=True, help='Path to the VQE model checkpoint.')
     parser.add_argument('--device', type=str, default='cuda', help='Device to run the tokenizer on (e.g., cpu, cuda, cuda:0). Defaults to cuda.')
+    parser.add_argument('--output_dir', type=str, required=True, help='Directory to save the output JSONL.GZ file.') # 新增参数
     parser.add_argument('--signal_strategy', type=str, default='apple', help='Nanopore signal processing strategy. Defaults to apple.')
 
     args = parser.parse_args()
@@ -166,6 +175,7 @@ def main():
     csv_path = args.csv_path
     model_path = args.model_path
     device = args.device
+    output_dir = args.output_dir # 获取新增参数
     signal_strategy = args.signal_strategy
 
     # 打印所有加载的配置参数
@@ -174,6 +184,7 @@ def main():
     print(f"  CSV Path (csv_path): {csv_path}")
     print(f"  Model Path (model_path): {model_path}")
     print(f"  Device (device): {device}")
+    print(f"  Output Dir (output_dir): {output_dir}") # 打印新增参数
     print(f"  Signal Strategy (signal_strategy): {signal_strategy}")
     print("--------------------------------------------------")
 
@@ -184,6 +195,7 @@ def main():
         csv_path=csv_path,
         model_path=model_path,
         device=device,
+        output_dir=output_dir, # 传递新增参数
         nanopore_signal_process_strategy=signal_strategy
     )
 

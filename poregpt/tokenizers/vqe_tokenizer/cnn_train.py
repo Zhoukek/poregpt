@@ -517,7 +517,7 @@ def main():
     loss_log_interval = config.get('training', {}).get('loss_log_interval', 10)
     checkpoint_path = config.get('training', {}).get('checkpoint_path', "checkpoint_nanopore_vq_tokenizer.pth")
     cnn_type = config.get('training', {}).get('cnn_type', 0)
-    prefetch_factor = config.get('training', {}).get('prefetch_factor', 128)
+    prefetch_factor = config.get('training', {}).get('prefetch_factor', 512)
 
     # 从 logging 部分提取
     do_evaluate = config.get('logging', {}).get('do_evaluate', False) # 默认为 False，与 argparse 的 store_true 行为不同

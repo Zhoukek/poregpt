@@ -31,6 +31,7 @@ namespaces = false   # 如果你未来用命名空间包，可设为 true
 
 [project.scripts]
 poregpt-cnn-train = "poregpt.tokenizers.vqe_tokenizer.cnn_train:main"
+poregpt-cnn-eval = "poregpt.tokenizers.vqe_tokenizer.cnn_eval:main"
 poregpt-vqe-tokenize-basecall-corpus = "poregpt.tokenizers.vqe_tokenizer.vqe_tokenize_basecall_corpus:main"
 poregpt-vqe-tokenize-trank = "poregpt.tokenizers.vqe_tokenizer.vqe_tokenize_trank:main"
 poregpt-vqe-tokenize-fast5 = "poregpt.tokenizers.vqe_tokenizer.vqe_tokenize_fast5:main"

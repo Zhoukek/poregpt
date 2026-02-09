@@ -16,7 +16,7 @@ from .vqe_tokenizer import VQETokenizer
 import torch
 
 
-def process_npy_file(npy_file_path, tokenizer, output_dir, max_batch_size):
+def process_npy_file(npy_file_path,  output_path, tokenizer,max_batch_size):
     """
     Process a single .npy file: load chunks, tokenize them in batches,
     and write results to a .jsonl.gz file.
@@ -28,11 +28,7 @@ def process_npy_file(npy_file_path, tokenizer, output_dir, max_batch_size):
         max_batch_size (int): Batch size for tokenization during inference.
     """
     npy_file_path = Path(npy_file_path)
-    output_dir = Path(output_dir)
 
-    # Determine output file path
-    output_filename = npy_file_path.with_suffix('.jsonl.gz').name
-    output_path = output_dir / output_filename
 
     try:
         # Load the .npy file
@@ -129,13 +125,14 @@ def process_npy_file(npy_file_path, tokenizer, output_dir, max_batch_size):
     except Exception as e:
         print(f"❌ Error writing to {output_path}: {e}")
 
-
 def main():
-    parser = argparse.ArgumentParser(description='Tokenize .npy files using VQETokenizer (Sequential).')
-    parser.add_argument('-i', '--input-dir', type=str, required=True,
-                        help='Input directory containing .npy files (searches recursively).')
-    parser.add_argument('-o', '--output-dir', type=str, required=True,
-                        help='Output directory to save .jsonl.gz files.')
+    parser = argparse.ArgumentParser(description='Tokenize a single .npy file using VQETokenizer.')
+    # Changed argument name from --input-dir to --input-file
+    parser.add_argument('-i', '--input-file', type=str, required=True,
+                        help='Input .npy file to tokenize.')
+    # Changed argument name from --output-dir to --output-file
+    parser.add_argument('-o', '--output-file', type=str, required=True,
+                        help='Output .jsonl.gz file to save tokens.')
     parser.add_argument('--model-ckpt', type=str, required=True,
                         help='Path to the VQ tokenizer model checkpoint (.pth file).')
     parser.add_argument('--device', type=str, default='cuda',
@@ -145,41 +142,43 @@ def main():
 
     args = parser.parse_args()
 
-    input_dir = Path(args.input_dir)
-    output_dir = Path(args.output_dir)
+    # Changed variable names for clarity
+    input_file = Path(args.input_file)
+    output_file = Path(args.output_file)
     model_ckpt = args.model_ckpt
     device = args.device
     batch_size = args.batch_size
 
-    # Validate input directory
-    if not input_dir.exists() or not input_dir.is_dir():
-        print(f"Error: Input directory does not exist: {input_dir}")
+    # Validate input *file*
+    if not input_file.exists() or not input_file.is_file():
+        print(f"Error: Input file does not exist or is not a file: {input_file}")
         return
 
-    # Create output directory
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Validate parent directory of output file exists, create output's parent directory if needed
+    output_parent_dir = output_file.parent
+    if not output_parent_dir.exists():
+        print(f"Creating output directory: {output_parent_dir}")
+        output_parent_dir.mkdir(parents=True, exist_ok=True)
 
-    # Find all .npy files
-    npy_files = list(input_dir.rglob("*.npy"))
-    if not npy_files:
-        print(f"No .npy files found in {input_dir}")
-        return
-
-    print(f"Found {len(npy_files)} .npy files.")
+    print(f"Processing file: {input_file.name}")
     print(f"Model checkpoint: {model_ckpt}")
     print(f"Device: {device}")
     print(f"Batch size: {batch_size}")
     print("-" * 60)
 
     # Initialize the tokenizer once
-    tokenizer = VQETokenizer(model_ckpt=model_ckpt, device=device, token_batch_size=batch_size)
+    tokenizer = VQETokenizer(model_ckpt=model_ckpt, device=device)
 
-    # Process files sequentially
-    for npy_file in tqdm(npy_files, desc="Processing .npy files"):
-        process_npy_file(npy_file, tokenizer, output_dir, batch_size)
-
-    print("\n✅ All .npy files processed sequentially.")
-
+    # Process the single file
+    # Note: process_npy_file likely needs to be adapted or replaced
+    # to handle a single file path and a specific output file path,
+    # rather than finding files recursively.
+    try:
+        process_npy_file(input_file, output_file, tokenizer, batch_size)
+        print(f"\n✅ File processed successfully: {input_file} -> {output_file}")
+    except Exception as e:
+        print(f"\n❌ Error processing file {input_file}: {e}")
+        return
 
 if __name__ == "__main__":
     # Need to import torch here as well

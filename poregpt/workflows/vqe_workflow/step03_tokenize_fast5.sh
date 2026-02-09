@@ -7,13 +7,13 @@
 set -e  # 出错立即退出
 which vq-tokenize
 # --- 配置 ---
-MODEL_CKPT="/mnt/gpudisk/dna_shards/vqe_models_pass18_only_init_codebook/nanopore_signal_tokenizer.pth.spoch16000.pth"
+MODEL_CKPT="/mnt/nas_syy/default/poregpt/poregpt/poregpt/workflows/vqe_workflow/step02_train_vqe_model/w64/models_scratch_cnn3/porepgt_vqe_tokenizer.step22500.pth"
 
 GPU_ID=0
 OUTPUT_ROOT="fast5_jsonlgz"
 
 
-FAST5_FILE="/mnt/nas_syy/default/huada_signal_llm/dataset/dna/human_min0_max2_read96655/fast5/train/train_00001.fast5"
+FAST5_FILE="/mnt/nas_syy/default/poregpt/shared/dataset/dna/human_min0_max2_read96655/fast5/train/train_00001.fast5"
 
 if [ ! -f "$FAST5_FILE" ]; then
     echo "❌ Input file not found: $FAST5_FILE"

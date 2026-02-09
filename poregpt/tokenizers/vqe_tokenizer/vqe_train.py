@@ -285,9 +285,13 @@ def vqe_train(
         config={
                 "device_micro_batch_size": device_micro_batch_size, # Changed from 'batch_size'
                 "lr": lr,
+                "cnn_type":cnn_type,
                 "num_epochs": num_epochs,
                 "codebook_size": codebook_size,
                 "chunk_size": chunk_size,
+                "dataset_logic_chunk_size":dataset_logic_chunk_size,
+                "device_micro_batch_size":device_micro_batch_size,
+                "global_batch_size":global_batch_size,
                 "update_loss_weight_every": update_loss_weight_every,
                 "commitment_weight": commitment_weight,
                 "codebook_diversity_loss_weight": codebook_diversity_loss_weight,
@@ -312,7 +316,7 @@ def vqe_train(
     # Data Loading
     # ========================
     # DataLoader's batch_size is now the micro-batch size per device/process.
-    train_dataset = NanoporeSignalDataset(shards_dir=train_npy_dir,logic_chunk_size=dataset_logic_chunk_size)
+    train_dataset = NanoporeSignalDataset(shards_dir=train_npy_dir,logic_chunk_size=dataset_logic_chunk_size,logic_chunk_overlap_size=100)
     # Accelerate provides a convenient way to create distributed samplers
     train_dataloader = DataLoader(
         train_dataset,
@@ -682,6 +686,7 @@ def vqe_train(
         print("=== 调试结束 ===\n")
     log_dict = {}
 
+    wandb_total_tokens = 0
     wandb_codebook_usage = 0
     wandb_codebook_top1_ratio = 0 
     wandb_codebook_top3_ratio = 0
@@ -743,7 +748,9 @@ def vqe_train(
                 # These happen after a full parameter update
                 global_step += 1 # Increment global step for every micro-step processed
 
-
+                # 只在梯度累积完成后执行裁剪（与优化器步骤同步）
+                accelerator.clip_grad_norm_(model.parameters(), 1.0)  # max_norm=1.0
+                
                 g_recon = recon_loss.item() # Get value from last micro-step
                 g_comit = comit_loss.item()
                 g_ortho = ortho_loss.item()
@@ -781,6 +788,7 @@ def vqe_train(
                         "train/ortho_loss": g_ortho,
                         "train/diver_loss": g_diver,
                         "train/total_loss": g_total,
+                        "evaluate/total_tokens": wandb_total_tokens, # Placeholder
                         "codebook/usage": wandb_codebook_usage, # Placeholder
                         "codebook/entropy": wandb_codebook_entropy, # Placeholder
                         "codebook/max_entropy": wandb_codebook_max_entropy, # Placeholder
@@ -804,7 +812,7 @@ def vqe_train(
                             result = evaluate_codebook_metrics_v2()
                             if accelerator.is_main_process:
                                 (wandb_codebook_usage, 
-                                    total_tokens, 
+                                   wandb_total_tokens, 
                                    wandb_codebook_top1_ratio, 
                                    wandb_codebook_top3_ratio,
                                    wandb_codebook_top5_ratio, 

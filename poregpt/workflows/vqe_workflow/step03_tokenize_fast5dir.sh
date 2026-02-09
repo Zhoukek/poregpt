@@ -4,11 +4,11 @@
 # Nanopore RVQ Tokenizer - Parallel with Skip Existing & Direct Output
 # ==============================
 
-FAST5_DIR="/mnt/nas_syy/default/huada_signal_llm/dataset/dna/human_min0_max2_read96655/fast5"
-OUTPUT_ROOT="fast5_jsonlgz_vqe20_spoch38000"
-MODEL_CKPT="/mnt/nas_syy/default/poregpt/shared/vqe_models_pass20_init_codebook_cnn_and_finetuned/checkpoints/porepgt_vqe_tokenizer.spoch38000.pth"
+FAST5_DIR="/mnt/nas_syy/default/poregpt/shared/dataset/dna/human_min0_max2_read96655/fast5"
+OUTPUT_ROOT="fast5_jsonlgz_pass25_c64k_gstep22500"
+MODEL_CKPT="/mnt/nas_syy/default/poregpt/poregpt/poregpt/workflows/vqe_workflow/step02_train_vqe_model/w64/models_scratch_cnn3/porepgt_vqe_tokenizer.step22500.pth"
 NUM_GPUS=4
-MAX_CONCURRENT=32  # 总并发数
+MAX_CONCURRENT=16  # 总并发数
 
 mkdir -p "$OUTPUT_ROOT"
 

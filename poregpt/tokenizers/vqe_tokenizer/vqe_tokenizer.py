@@ -25,11 +25,58 @@ from typing import List
 import numpy as np
 from typing import List
 
-
+from accelerate import Accelerator
 # Import your model definition (must define NanoporeVQModel)
 from .vq_model import NanoporeVQModel
 
 
+def load_accelerate_checkpoint(model_ckpt_dir: str):
+    """
+    从accelerate保存的目录中加载模型检查点
+    """
+    from accelerate import Accelerator
+    from safetensors.torch import load_file
+    import json
+
+    # 直接从model.safetensors加载模型权重
+    model_weights_path = os.path.join(model_ckpt_dir, "model.safetensors")
+    if os.path.exists(model_weights_path):
+        state_dict = load_file(model_weights_path, device="cpu")
+    else:
+        # 如果没有model.safetensors，尝试pytorch_model.bin
+        model_bin_path = os.path.join(model_ckpt_dir, "pytorch_model.bin")
+        if os.path.exists(model_bin_path):
+            state_dict = torch.load(model_bin_path, map_location="cpu", weights_only=False)
+        else:
+            # 查找其他可能的模型权重文件
+            model_files = [f for f in os.listdir(model_ckpt_dir)
+                         if f.endswith(('.bin', '.safetensors')) and 'model' in f]
+            if model_files:
+                model_weights_path = os.path.join(model_ckpt_dir, model_files[0])
+                if model_weights_path.endswith('.safetensors'):
+                    state_dict = load_file(model_weights_path, device="cpu")
+                else:
+                    state_dict = torch.load(model_weights_path, map_location="cpu", weights_only=False)
+            else:
+                raise FileNotFoundError(f"No model weights file found in {model_ckpt_dir}")
+
+    # 查找metadata.json文件并读取cnn_type
+    metadata_path = None
+    for f in os.listdir(model_ckpt_dir):
+        if f.endswith('metadata.json'):
+            metadata_path = os.path.join(model_ckpt_dir, f)
+            break
+
+    cnn_type = 0
+    if metadata_path and os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, 'r') as meta_f:
+                metadata = json.load(meta_f)
+                cnn_type = metadata.get('cnn_type', 0)
+        except:
+            cnn_type = 0
+
+    return {'model_state_dict': state_dict, 'cnn_type': cnn_type}
 class VQETokenizer:
     """
     Nanopore Single-Layer VQ Tokenizer.
@@ -64,14 +111,14 @@ class VQETokenizer:
 
         # --- Load checkpoint ---
         print(f"📂 Loading checkpoint: {model_ckpt}")
-        ckpt_data = torch.load(model_ckpt, map_location="cpu",weights_only=False)
-
+        ckpt_data = load_accelerate_checkpoint(model_ckpt)
         # ✅ 1. 从 checkpoint 中读取 cnn_type（关键！）
         if 'cnn_type' not in ckpt_data:
             print("Checkpoint does not contain 'cnn_type'. forced to 0")
             cnn_type = 0
         else:
             cnn_type = ckpt_data['cnn_type']
+
 
         # ✅ 正确：从 model_state_dict 中找 codebook
         state_dict = ckpt_data['model_state_dict']

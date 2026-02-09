@@ -5,75 +5,10 @@ from vector_quantize_pytorch import VectorQuantize
 from typing import Tuple, Dict
 # 导入新的 CNN 模型
 from .cnn_model import NanoporeCNNModel
-class Conv1dWithMeanChannel(nn.Module):
-    """
-    Conv1d层，其中第一个输出通道（索引0）是输入信号在卷积核窗口内的均值。
-    其余的输出通道由标准卷积操作生成。
-    注意：此版本的 in_channels 固定为 1，并使用优化的均值计算方法。
-    """
-    def __init__(self, out_channels, kernel_size, stride=1, padding=0, bias=False):
-        super(Conv1dWithMeanChannel, self).__init__()
-        self.in_channels = 1  # 固定为 1
-        self.out_channels = out_channels
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.padding = padding
 
-        if out_channels <= 0:
-            raise ValueError(f"out_channels 必须为正数，得到的是 {out_channels}")
 
-        # 创建一个专门用于计算均值的卷积层
-        # 权重初始化为 1/kernel_size，使得卷积结果为平均值
-        # 偏置设为 0
-        self.mean_conv = nn.Conv1d(
-            in_channels=1,
-            out_channels=1,  # 只需要一个输出通道来存放均值
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            bias=False # 不需要偏置
-        )
-        # 将权重设置为 1/kernel_size
-        with torch.no_grad():
-            self.mean_conv.weight.fill_(1.0 / kernel_size)
-
-        # 我们需要至少1个通道来存放均值。如果 out_channels > 1，
-        # 对其余的 (out_channels - 1) 个通道执行标准卷积。
-        self.use_standard_conv = out_channels > 1
-        if self.use_standard_conv:
-            # 为其余 (out_channels - 1) 个通道创建标准卷积层
-            self.std_conv = nn.Conv1d(1, out_channels - 1, kernel_size, stride=stride, padding=padding, bias=bias)
-
-    def forward(self, x):
-        """
-        前向传播函数。
-
-        Args:
-            x (torch.Tensor): 输入张量，形状为 [Batch_Size, 1, Input_Length] (因为 in_channels 固定为 1)
-
-        Returns:
-            torch.Tensor: 输出张量，形状为 [Batch_Size, out_channels, Output_Length]
-                          其中第一个通道是输入的局部均值。
-        """
-        # --- 计算局部均值 (优化版) ---
-        # 直接使用预设权重的卷积层来计算均值
-        # 该卷积层的权重为 [1/kernel_size, 1/kernel_size, ..., 1/kernel_size]
-        # 卷积运算自动完成了求和与除法，得到均值
-        mean_channel = self.mean_conv(x) # [B, 1, L_out]
-
-        # --- 构造最终输出 ---
-        if not self.use_standard_conv:
-            # 如果只需要1个输出通道，则直接返回计算出的均值通道
-            return mean_channel
-
-        # --- 如果需要更多通道 ---
-        # 对输入x执行标准卷积，生成其余的 (out_channels - 1) 个通道
-        std_conv_out = self.std_conv(x) # [B, out_ch - 1, L_out]
-
-        # 将计算出的均值通道（作为第一个）与标准卷积的结果通道拼接起来
-        output = torch.cat([mean_channel, std_conv_out], dim=1) # [B, out_ch, L_out]
-
-        return output
+# 导入局部注意力模块
+from .local_attention import LocalTransformerEncoderLayer
 
 
 class NanoporeVQModel(nn.Module):
@@ -103,7 +38,12 @@ class NanoporeVQModel(nn.Module):
         learnable_codebook: bool= True,
         init_codebook_path: str = None,
         freeze_cnn: bool = False,
-        cnn_checkpoint_path: str = None
+        cnn_checkpoint_path: str = None,
+        # Transformer 参数
+        nhead: int = 8,              # Transformer 头数
+        num_layers: int = 8,         # Transformer 层数
+        dim_feedforward: int = 1024, # FFN 维度
+        dropout: float = 0.1,
     ):
         """
         初始化 NanoporeVQModel。
@@ -120,48 +60,18 @@ class NanoporeVQModel(nn.Module):
         """
         super().__init__()
 
-        # 设置 codebook_dim 根据 cnn_type
-        if cnn_type == 0:
-            codebook_dim = 256
-        elif cnn_type == 1:
-            codebook_dim = 64
-        elif cnn_type == 2:
-            codebook_dim = 512  # 固定为 512，与你提供的结构一致
-        elif cnn_type == 3:
-            codebook_dim = 64  # 固定为 512，与你提供的结构一致
-        else:
-            raise ValueError(f"Unsupported cnn_type: {cnn_type}. Supported: 0, 1, or 2.")
+        self.cnn_model = NanoporeCNNModel(cnn_type=cnn_type)
+        
+        d_model = self.cnn_model.out_channels  # 自动设置为CNN输出维度
+        
+        codebook_dim = d_model
 
+        # 设置 codebook_dim 根据 cnn_type
         self.codebook_dim = codebook_dim
         self.cnn_type = cnn_type
-        self.latent_dim = codebook_dim
         self.codebook_size = codebook_size
         print(f"codebook_dim:{codebook_dim}")
-        # 构建 encoder 和 decoder
-        if cnn_type == 0:
-            self._build_encoder_type0()
-            self._build_decoder_type0()
-            self.cnn_stride = 5   # 总下采样率（仅最后一层 stride=5）
-            self.RF = 33          # 感受野（采样点），对应 ~1 个 RNA 碱基
-        elif cnn_type == 1:
-            self._build_encoder_type1()
-            self._build_decoder_type1()
-            self.cnn_stride = 5   # 总下采样率（仅最后一层 stride=5）
-            self.RF = 33          # 感受野（采样点），对应 ~1 个 RNA 碱基
-        elif cnn_type == 2:
-            self._build_encoder_type2()
-            self._build_decoder_type2()
-            self.cnn_stride = 12  # 1 * 1 * 3 * 2 * 2
-            self.RF = 65  #
-        elif cnn_type == 3:
-            self._build_encoder_type3()
-            self._build_decoder_type3()
-            self.cnn_stride = 5   # 总下采样率（仅最后一层 stride=5）
-            self.RF = 33          # 感受野（采样点），对应 ~1 个 RNA 碱基
-        else:
-            raise ValueError(f"Unsupported cnn_type: {cnn_type}. Supported: 0 or 1.")
-
-
+ 
         # ======================================================================
         # VECTOR QUANTIZATION (VQ)
         # ======================================================================
@@ -171,8 +81,40 @@ class NanoporeVQModel(nn.Module):
         else:
             ema_update = True
 
+
+        # -----------------------------
+        # 2. Transformer Context Modeler
+        # -----------------------------
+        self.d_model = d_model # 256
+        
+        dim_feedforward = d_model
+        # 线性投影层: 将 CNN 特征 (128) 映射到 Transformer 维度 (256)
+        
+        # 构建 Transformer Encoder
+        # encoder_layer = nn.TransformerEncoderLayer(
+        #     d_model=d_model, 
+        #     nhead=nhead, 
+        #     dim_feedforward=dim_feedforward, 
+        #     dropout=dropout,
+        #     batch_first=True # 非常重要：保持 (Batch, Seq, Feature) 格式
+        # )
+        # self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        # 使用局部注意力的Transformer
+        encoder_layer = LocalTransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            window_size=65,  # 局部窗口大小
+            dim_feedforward=dim_feedforward,
+            dropout=dropout
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+
+
+
         self.vq = VectorQuantize(
-            dim=self.latent_dim,
+            dim=d_model,
             codebook_size=codebook_size,
             kmeans_init=True,
             kmeans_iters=10,
@@ -380,7 +322,7 @@ class NanoporeVQModel(nn.Module):
     def _print_vq_config(self) -> None:
         """打印 VQ 配置信息（仅 rank 0）"""
         print("Intialized VectorQuantize with the following hyperparameters:")
-        print(f"  dim: {self.latent_dim}")
+        print(f"  dim: {self.d_model}")
         print(f"  codebook_size: {self.codebook_size}")
         print(f"  kmeans_init: True")
         print(f"  kmeans_iters: 10")
@@ -394,233 +336,111 @@ class NanoporeVQModel(nn.Module):
         print(f"  cnn_type: {self.cnn_type}")
         print("-" * 60)
 
-    # ────────────────────────────────────────────────
-    # ENCODER BUILDERS
-    # ────────────────────────────────────────────────
-
-    def _build_encoder_type0(self) -> None:
-        """构建 cnn_type=0 的 encoder：1 → 64 → 128 → latent_dim（如 256）"""
-        self.encoder = nn.Sequential(
-            # Layer 1: 超局部特征提取（无下采样）
-            nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Layer 2: 局部上下文聚合（无下采样）
-            nn.Conv1d(64, 128, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Layer 3: 下采样 + 升维至 latent space（RF=33, stride=5）
-            nn.Conv1d(128, self.latent_dim, kernel_size=25, stride=5, padding=12, bias=False),
-            nn.BatchNorm1d(self.latent_dim),
-        )
-
-    def _build_encoder_type1(self) -> None:
-        """构建 cnn_type=1 的 encoder：1 → 16 → 32 → 64（严格对称）"""
-        self.encoder = nn.Sequential(
-            # Layer 1: 1 → 16
-            nn.Conv1d(1, 16, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(16),
-            nn.SiLU(),
-
-            # Layer 2: 16 → 32
-            nn.Conv1d(16, 32, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(32),
-            nn.SiLU(),
-
-            # Layer 3: 32 → 64, stride=5, RF=33
-            nn.Conv1d(32, 64, kernel_size=25, stride=5, padding=12, bias=False),
-            nn.BatchNorm1d(64),
-        )
-    def _build_encoder_type2(self) -> None:
-        """cnn_type=2: 多阶段下采样，总 stride=12，输出通道=512"""
-        self.encoder = nn.Sequential(
-            # Layer 1: 1 → 64, stride=1
-            nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Layer 2: 64 → 64, stride=1
-            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Layer 3: 64 → 128, stride=3
-            nn.Conv1d(64, 128, kernel_size=9, stride=3, padding=4, bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Layer 4: 128 → 128, stride=2
-            nn.Conv1d(128, 128, kernel_size=9, stride=2, padding=4, bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Layer 5: 128 → 512, stride=2
-            nn.Conv1d(128, self.latent_dim, kernel_size=5, stride=2, padding=2, bias=False),
-            nn.BatchNorm1d(self.latent_dim),
-        )
-    def _build_encoder_type3(self) -> None:
-        """构建 cnn_type=1 的 encoder：1 → 16 → 32 → 64（严格对称）
-        Modified: First layer has the first channel as local mean.
-        """
-        self.encoder = nn.Sequential(
-            # Layer 1: 1 → 16, 第一个通道(kernel_size=5区域内的均值)，其余15个通道来自标准卷积
-            # 注意：调用时不再需要传入 in_channels，因为它已被固定为 1
-            Conv1dWithMeanChannel(out_channels=16, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(16),
-            nn.SiLU(),
-
-            # Layer 2: 16 → 32
-            nn.Conv1d(16, 32, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(32),
-            nn.SiLU(),
-
-            # Layer 3: 32 → 64, stride=5, RF=33
-            nn.Conv1d(32, 64, kernel_size=25, stride=5, padding=12, bias=False),
-            nn.BatchNorm1d(64),
-        )
-
-
-    # ────────────────────────────────────────────────
-    # DECODER BUILDERS
-    # ────────────────────────────────────────────────
-
-    def _build_decoder_type0(self) -> None:
-        """构建 cnn_type=0 的 decoder（近似对称，高维 refine）"""
-        self.decoder = nn.Sequential(
-            # Upsample ×5: 逆操作 encoder 最后一层
-            nn.ConvTranspose1d(
-                in_channels=self.latent_dim,
-                out_channels=128,
-                kernel_size=25,
-                stride=5,
-                padding=12,
-                output_padding=0,
-                bias=False,
-            ),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Refine layer: 消除棋盘伪影
-            nn.Conv1d(128, 64, kernel_size=5, padding=2,bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Final projection to raw signal
-            nn.Conv1d(64, 1, kernel_size=5,padding=2,bias=True),
-        )
-
-    def _build_decoder_type1(self) -> None:
-        """构建 cnn_type=1 的 decoder（严格对称：64 → 32 → 16 → 1）"""
-        self.decoder = nn.Sequential(
-            # Inverse of encoder Layer 3: 64 → 32
-            nn.ConvTranspose1d(
-                in_channels=64,
-                out_channels=32,
-                kernel_size=25,
-                stride=5,
-                padding=12,
-                output_padding=0,
-                bias=False,
-            ),
-            nn.BatchNorm1d(32),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 2: 32 → 16
-            nn.Conv1d(32, 16, kernel_size=5, padding=2,bias=False),
-            nn.BatchNorm1d(16),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 1: 16 → 1
-            nn.Conv1d(16, 1, kernel_size=5, padding=2,bias=True)
-        )
-    def _build_decoder_type2(self) -> None:
-        """严格对称 decoder: 512 → 128 → 128 → 64 → 64 → 1，上采样顺序与 encoder 下采样逆序对应"""
-        self.decoder = nn.Sequential(
-            # Inverse of encoder Layer 5: 512 → 128, upsample ×2
-            nn.ConvTranspose1d(512, 128, kernel_size=5, stride=2, padding=2, output_padding=0,bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 4: 128 → 128, upsample ×2
-            nn.ConvTranspose1d(128, 128, kernel_size=9, stride=2, padding=4, output_padding=0,bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 3: 128 → 64, upsample ×3
-            nn.ConvTranspose1d(128, 64, kernel_size=9, stride=3, padding=4, output_padding=0,bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 2: 64 → 64
-            nn.Conv1d(64, 64, kernel_size=5, padding=2,bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 1: 64 → 1
-            nn.Conv1d(64, 1, kernel_size=5,padding=2,bias=True)
-        )
-    def _build_decoder_type3(self) -> None:
-        """构建 cnn_type=1 的 decoder（严格对称：64 → 32 → 16 → 1）"""
-        self.decoder = nn.Sequential(
-            # Inverse of encoder Layer 3: 64 → 32
-            nn.ConvTranspose1d(
-                in_channels=64,
-                out_channels=32,
-                kernel_size=25,
-                stride=5,
-                padding=12,
-                output_padding=0,
-                bias=False,
-            ),
-            nn.BatchNorm1d(32),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 2: 32 → 16
-            nn.Conv1d(32, 16, kernel_size=5, padding=2,bias=False),
-            nn.BatchNorm1d(16),
-            nn.SiLU(),
-            # Inverse of encoder Layer 1: 16 → 1
-            nn.Conv1d(16, 1, kernel_size=5, padding=2,bias=True)
-        )
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict]:
         """
-        前向传播。
+        前向传播函数 (升级版：支持 CNN + Transformer 架构)。
 
         Args:
             x (torch.Tensor): 输入信号，形状 [B, 1, T]
+                (例如: B=4, T=2560 -> )
 
         Returns:
             recon (torch.Tensor): 重建信号，[B, 1, T]
-            indices (torch.Tensor): VQ 离散 token，[B, T//5]
+            indices (torch.Tensor): VQ 离散 token，[B, N] (N = T // 5)
             loss (torch.Tensor): VQ 总损失（标量）
             loss_breakdown (dict): 损失分项（commitment, diversity, ortho...）
         """
-        # Encode: [B, 1, T] → [B, C, T//5]
-        z_continuous = self.encoder(x)
 
-        # Permute for VQ: [B, C, N] → [B, N, C]
-        z_permuted = z_continuous.permute(0, 2, 1)
+        # ======================================================================
+        # 1. CNN 编码器 (特征提取)
+        #    目标：将原始长序列压缩为较短的特征序列
+        # ======================================================================
+        # 输入 x: [B, 1, T]
+        #   (B: Batch Size, 1: 单通道电信号, T: 信号长度 2560)
+        z_cnn = self.cnn_model.encode(x)
+        # 输出 z_cnn: [B, C_CNN, N]
+        #   (C_CNN: CNN 特征维度 = 128, N: 序列长度 = T//5 = 512)
+        #   例如:
 
-        # Quantize
+        # ======================================================================
+        # 2. 维度变换与投影 (Projection)
+        #    目标：适配 Transformer 的输入维度 (128 -> 256)
+        # ======================================================================
+        # 2.1 变换维度顺序
+        # PyTorch 的 CNN 输出是 [B, Channels, Length]
+        # PyTorch 的 Transformer 要求 [B, Length, Features] (batch_first=True)
+        z_permuted = z_cnn.permute(0, 2, 1)
+        # z_permuted: [B, N, C_CNN] -> 例如:
+
+        # 2.2 线性投影 (Projection)
+        # 将 CNN 提取的 128 维特征，映射到 Transformer 的 256 维空间
+        # 这对应架构中的 "Linear Projection: 128 -> 256"
+        # z_projected = self.proj_in(z_permuted)
+        # z_projected: [B, N, D_Model]
+        #   (D_Model: Transformer 模型维度 = 256)
+        #   例如:
+        # 这个张量就是你描述中的 h_proj / z_e (Encoder Output)
+        
+        # ======================================================================
+        # 3. Transformer 上下文建模 (Context Modeling)
+        #    目标：利用全局注意力机制增强特征表达能力
+        # ======================================================================
+        # 输入 z_projected: [B, N, 256]
+        z_transformed = self.transformer_encoder(z_permuted)
+        # 输出 z_transformed: [B, N, 256]
+        # 特征维度保持 256 不变，但每个位置的特征都融合了全局上下文信息
+        # 这个张量就是最终送入 VQ 的 z_e
+
+        # ======================================================================
+        # 4. 向量量化 (Vector Quantization - VQ)
+        #    目标：将连续特征映射为离散 Token
+        # ======================================================================
+        # 注意：z_transformed 的形状已经是 [B, N, 256]，完美符合 VQ 输入要求
+        # (不需要像 CNN 那样先 Permute，因为 Transformer 输出已经是 [B, N, C])
+
+        # VQ 处理：
+        # 1. 计算距离：找到 z_transformed 中每个向量在 Codebook 中最接近的索引
+        # 2. 生成 Token：输出离散索引 indices
+        # 3. 生成量化向量：输出可微的 z_quantized_permuted (用于反向传播)
         z_quantized_permuted, indices, loss, loss_breakdown = self.vq(
-            z_permuted, return_loss_breakdown=True
+            z_transformed, # 输入连续特征
+            return_loss_breakdown=True # 返回详细的损失分项
         )
 
-        # Back to [B, C, N] for decoder
+        # z_quantized_permuted: [B, N, 256] (量化后的连续特征，用于 Decoder)
+        # indices: [B, N] (离散的 Token ID，用于存储/下游任务)
+        #   例如 indices:
+
+        # ======================================================================
+        # 5. 解码器准备 (Decoder Preparation)
+        #    目标：将特征格式转换回 CNN 解码器需要的格式
+        # ======================================================================
+        # Decoder (反卷积网络) 需要的格式是 [B, Channels, Length]
         z_quantized = z_quantized_permuted.permute(0, 2, 1)
+        # z_quantized: [B, 256, N] -> 例如:
 
-        # Decode
-        recon = self.decoder(z_quantized)
+        # ======================================================================
+        # 6. 解码器 (Decoder - 信号重构)
+        #    目标：将量化特征重构回原始信号空间
+        # ======================================================================
+        recon = self.cnn_model.decode(z_quantized)
+        # recon: [B, 1, T_recon]
+        #   (理论上 T_recon 应该等于 T，但为了防止反卷积导致的长度微小差异)
 
-        # Length alignment: ensure recon length == input length
-        target_len = x.shape[-1]
-        current_len = recon.shape[-1]
+        # ======================================================================
+        # 7. 长度对齐 (Length Alignment)
+        #    目标：确保输出信号长度与输入完全一致
+        # ======================================================================
+        target_len = x.shape[-1]  # 输入信号的原始长度 (2560)
+        current_len = recon.shape[-1] # 重构信号的当前长度
+
         if current_len > target_len:
+            # 如果重构信号过长（通常由 Padding 引起），进行裁剪
             recon = recon[..., :target_len]
         elif current_len < target_len:
+            # 如果重构信号过短，进行填充 (Pad)
+            # F.pad 的参数是 (左填充, 右填充)，这里只在时间轴末尾填充
             recon = F.pad(recon, (0, target_len - current_len))
 
         return recon, indices, loss, loss_breakdown

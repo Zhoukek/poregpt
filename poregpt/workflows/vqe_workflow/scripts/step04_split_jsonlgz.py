@@ -10,7 +10,7 @@ def extract_tokens(text):
     """Extract all tokens of the form <|bwav:...|>"""
     return re.findall(r"<\|bwav:[^|>]+\|>", text)
 
-def split_with_overlap(tokens, window=8192, overlap=1024):
+def split_with_overlap(tokens, window=8192, overlap=100):
     """滑动窗口分割，带重叠"""
     if len(tokens) <= window:
         return [tokens]
@@ -28,9 +28,9 @@ def split_with_overlap(tokens, window=8192, overlap=1024):
 def process_single_file(args):
     """
     处理单个 .jsonl.gz 文件
-    args: (input_path_str, output_dir_str, min_chunk_token_count)
+    args: (input_path_str, output_dir_str, min_chunk_token_count, chunk_window_size, chunk_overlap_size)
     """
-    input_path_str, output_dir_str, min_chunk_token_count = args
+    input_path_str, output_dir_str, min_chunk_token_count, chunk_window_size, chunk_overlap_size = args
     input_path = Path(input_path_str)
     output_dir = Path(output_dir_str)
     output_path = output_dir / (input_path.name.replace('.jsonl.gz', '.split.jsonl.gz'))
@@ -60,7 +60,7 @@ def process_single_file(args):
                     num_tokens = len(tokens)
                     total_input_tokens += num_tokens
 
-                    chunks = split_with_overlap(tokens, window=8192, overlap=1024)
+                    chunks = split_with_overlap(tokens, window=chunk_window_size, overlap=chunk_overlap_size)
 
                     kept_chunks = []
                     for chunk in chunks:
@@ -116,6 +116,8 @@ def main():
     parser.add_argument("--output_dir", type=str, required=True, help="Output directory")
     parser.add_argument("--workers", type=int, default=None, help="Number of worker processes (default: CPU count)")
     parser.add_argument("--min_chunk_token_count", type=int, default=1200, help="Minimum number of tokens a chunk must have to be kept (default: 1)")
+    parser.add_argument("--chunk_window_size", type=int, default=8192, help="Size of the sliding window for chunking (default: 8192)")
+    parser.add_argument("--chunk_overlap_size", type=int, default=100, help="Overlap size between consecutive chunks (default: 100)")
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
@@ -126,11 +128,13 @@ def main():
     if not jsonl_files:
         raise FileNotFoundError(f"No .jsonl.gz files found in {input_dir}")
 
-    task_args = [(str(f), str(output_dir), args.min_chunk_token_count) for f in sorted(jsonl_files)]
+    task_args = [(str(f), str(output_dir), args.min_chunk_token_count, args.chunk_window_size, args.chunk_overlap_size) for f in sorted(jsonl_files)]
 
     workers = args.workers or min(cpu_count(), len(jsonl_files))
     print(f"🚀 Starting parallel processing with {workers} workers...")
     print(f"   ⚙️  Min chunk token count: {args.min_chunk_token_count}")
+    print(f"   ⚙️  Chunk window size: {args.chunk_window_size}")
+    print(f"   ⚙️  Chunk overlap size: {args.chunk_overlap_size}")
 
     with Pool(processes=workers) as pool:
         results = pool.map(process_single_file, task_args)

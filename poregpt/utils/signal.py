@@ -138,15 +138,124 @@ def _nanopore_remove_spikes(
             cleaned[i] = cleaned[i - 1]
     return cleaned
 
+import numpy as np
+from scipy.ndimage import median_filter
+
+def _nanopore_repair_final(signal: np.ndarray, repair_threshold=3.0, repair_window_size=100) -> np.ndarray:
+    """
+    修复信号中的异常值，将超过阈值的点用附近窗口内的中值替代
+    Args:
+        signal (np.ndarray): 输入信号
+        repair_threshold (float): 修复阈值，默认3.0
+        repair_window_size (int): 修复窗口大小，默认100
+        
+    Returns:
+        np.ndarray: 修复后的信号
+    """
+    signal = np.asarray(signal, dtype=np.float32)
+    if signal.size == 0:
+        return signal
+    
+    # 计算信号的绝对值，找出超过阈值的位置
+    abs_signal = np.abs(signal)
+    outlier_mask = abs_signal > repair_threshold
+    
+    if not np.any(outlier_mask):
+        return signal
+    # 创建修复后的信号副本
+    repaired_signal = signal.copy()
+    # 使用median_filter计算每个点附近的中值
+    # 注意：scipy的median_filter需要奇数窗口大小
+    if repair_window_size % 2 == 0:
+        actual_window_size = repair_window_size + 1
+    else:
+        actual_window_size = repair_window_size
+    # 计算局部中值
+    local_median = median_filter(signal, size=actual_window_size, mode='reflect')
+    # 将异常值替换为其对应位置的局部中值
+    repaired_signal[outlier_mask] = local_median[outlier_mask]
+    return repaired_signal
+
+import numpy as np
+
+def _nanopore_truncate_signal(signal: np.ndarray, truncate_threshold=3.0) -> np.ndarray:
+    """
+    截断信号中绝对值大于阈值的部分
+    
+    Args:
+        signal (np.ndarray): 输入信号
+        truncate_threshold (float): 截断阈值，默认3.0
+        
+    Returns:
+        np.ndarray: 截断后的信号
+    """
+    signal = np.asarray(signal, dtype=np.float32)
+    if signal.size == 0:
+        return signal
+    
+    # 创建信号副本以避免修改原数组
+    truncated_signal = signal.copy()
+    
+    # 找出绝对值大于阈值的位置
+    mask = np.abs(truncated_signal) > truncate_threshold
+    
+    # 将这些位置的值截断到阈值范围内
+    truncated_signal[mask] = np.clip(truncated_signal[mask], -truncate_threshold, truncate_threshold)
+    
+    return truncated_signal
+
+
+def _nanopore_soft_clip_tanh(signal: np.ndarray, limit=3.0) -> np.ndarray:
+    """
+    使用 Tanh 函数对信号进行平滑压缩（软截断）。
+    公式：f(x) = limit * tanh(x / limit)
+    """
+    signal = np.asarray(signal, dtype=np.float32)
+    if signal.size == 0:
+        return signal
+    
+    # 执行软截断
+    return (limit * np.tanh(signal / limit)).astype(np.float32)
+
 def nanopore_process_signal(signal_raw,strategy="apple"):
     signal_return = None
     if strategy == "stone":
         signal_return = _nanopore_normalize_huada(signal_raw)
     elif strategy == "apple":
         signal_clear = _nanopore_repair_errors(signal_raw, 1, 220)
-        signal_elite = _nanopore_remove_spikes(signal_clear, window_size=5000, spike_threshold=5.0)
+        signal_elite = _nanopore_remove_spikes(signal_clear, window_size=6000, spike_threshold=5.0)
         signal_nomal,_ = _nanopore_normalize_novel(signal_elite)
         signal_return = medfilt(signal_nomal, kernel_size=5).astype(np.float32)
+    elif strategy == "lemon":
+        signal_clear = _nanopore_repair_errors(signal_raw, 1, 220)
+        signal_elite = _nanopore_remove_spikes(signal_clear, window_size=6000, spike_threshold=5.0)
+        signal_nomal,_ = _nanopore_normalize_novel(signal_elite)
+        signal_medfilt = medfilt(signal_nomal, kernel_size=5).astype(np.float32)
+        signal_return = _nanopore_truncate_signal(signal_medfilt, truncate_threshold=5.0) 
+    elif strategy == "tango":
+        # 1. 基础修复与去刺（沿用 apple/lemon 的前处理）
+        signal_clear = _nanopore_repair_errors(signal_raw, 1, 220)
+        signal_elite = _nanopore_remove_spikes(signal_clear, window_size=6000, spike_threshold=5.0)
+        # 2. 标准化（Median-MAD）
+        signal_nomal,_ = _nanopore_normalize_novel(signal_elite)
+        # 3. 降噪（中值滤波）
+        # 如果你担心保真度，这里可以考虑将 kernel_size 改为 3
+        # signal_medfilt = medfilt(signal_nomal, kernel_size=5).astype(np.float32)
+        # 4. 核心替换：用 Tanh 软截断代替 Truncate
+        # 此时信号超过 3 的部分会平滑靠拢，而不是被直接切平
+        signal_return = _nanopore_soft_clip_tanh(signal_nomal,5.0)
+    elif strategy == "mongo":
+        # 1. 基础修复与去刺（沿用 apple/lemon 的前处理）
+        signal_clear = _nanopore_repair_errors(signal_raw, 1, 220)
+        signal_elite = _nanopore_remove_spikes(signal_clear, window_size=6000, spike_threshold=5.0)
+        # 2. 标准化（Median-MAD）
+        signal_nomal,_ = _nanopore_normalize_novel(signal_elite)
+        # 3. 降噪（中值滤波）
+        # 如果你担心保真度，这里可以考虑将 kernel_size 改为 3
+        # signal_medfilt = medfilt(signal_nomal, kernel_size=5).astype(np.float32)
+        # 4. 核心替换：用 Tanh 软截断代替 Truncate
+        # 此时信号超过 3 的部分会平滑靠拢，而不是被直接切平
+        signal_return = signal_nomal
     return signal_return
 
 

@@ -13,15 +13,11 @@ if __name__ == "__main__":
     parser.add_argument("--chunk_size", type=int, default=12000)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--val_ratio", type=float, default=0.1)
-    parser.add_argument("--commitment_weight", type=float, default=1.0)
-    parser.add_argument("--codebook_diversity_loss_weight", type=float, default=1.0)
-    parser.add_argument("--orthogonal_reg_weight", type=float, default=1.0)
+    parser.add_argument("--commitment_weight", type=float, default=0.25)
     parser.add_argument("--loss_csv_path", type=str, default="train_loss.csv")
-    parser.add_argument("--save_checkpoint_every_spoch", type=int, default=10)
-    parser.add_argument("--loss_log_interval", type=int, default=10)
+    parser.add_argument("--save_checkpoint_interval", type=int, default=10)
     parser.add_argument("--do_evaluate", action="store_true", help="Enable codebook usage evaluation")
-    parser.add_argument("--checkpoint_path", type=str, default="checkpiint_nanopore_vq_tokenizer.pth")
-    parser.add_argument("--cnn_type", type=int, default=0)
+
     args = parser.parse_args()
 
     vq_train(
@@ -36,12 +32,7 @@ if __name__ == "__main__":
         val_ratio=args.val_ratio,
         do_evaluate=args.do_evaluate,
         commitment_weight=args.commitment_weight,
-        codebook_diversity_loss_weight=args.codebook_diversity_loss_weight,
-        orthogonal_reg_weight=args.orthogonal_reg_weight,
         loss_csv_path=args.loss_csv_path,
-        save_checkpoint_every_spoch=args.save_checkpoint_every_spoch,
-        loss_log_interval=args.loss_log_interval,
-        checkpoint_path=args.checkpoint_path,
-        cnn_type=args.cnn_type
+        save_checkpoint_interval=args.save_checkpoint_interval
     )
 

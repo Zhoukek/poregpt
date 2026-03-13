@@ -137,8 +137,8 @@ def main():
                         help='Path to the VQ tokenizer model checkpoint (.pth file).')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to run the model on (default: cuda). Use "cpu" if CUDA is unavailable.')
-    parser.add_argument('--batch-size', type=int, default=32,
-                        help='Batch size for tokenization (default: 32).')
+    parser.add_argument('--batch-size', type=int, default=32,help='Batch size for tokenization (default: 32).')
+    parser.add_argument('--model-type', type=int, default=1,help='Excpected Model type')
 
     args = parser.parse_args()
 
@@ -148,6 +148,7 @@ def main():
     model_ckpt = args.model_ckpt
     device = args.device
     batch_size = args.batch_size
+    model_type = args.model_type
 
     # Validate input *file*
     if not input_file.exists() or not input_file.is_file():
@@ -167,7 +168,7 @@ def main():
     print("-" * 60)
 
     # Initialize the tokenizer once
-    tokenizer = VQETokenizer(model_ckpt=model_ckpt, device=device)
+    tokenizer = VQETokenizer(model_ckpt=model_ckpt, device=device,model_type=model_type)
 
     # Process the single file
     # Note: process_npy_file likely needs to be adapted or replaced

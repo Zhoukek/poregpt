@@ -351,15 +351,109 @@ def cnn_train(
 
     if load_flag.item() == 1:
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt['model_state_dict'])
+        # 🔧 修复：智能处理DDP状态字典兼容性
+        model_state_dict = ckpt['model_state_dict']
+        # 获取当前模型（DDP包装后）期待的键名
+        expected_keys = set(model.state_dict().keys()) # <--- 修改点1: 直接获取 DDP 包装后模型的键
+        checkpoint_keys = set(model_state_dict.keys())
+        
+        # 如果检查点键名与当前模型不匹配，尝试修复
+        if checkpoint_keys != expected_keys:
+            # 检查是否只需要添加 'module.' 前缀
+            prefixed_keys = {'module.' + k for k in checkpoint_keys}
+            if prefixed_keys == expected_keys:
+                # 需要为所有键添加 'module.' 前缀
+                new_state_dict = {f'module.{k}': v for k, v in model_state_dict.items()}
+                model_state_dict = new_state_dict
+                print("🔄 Fixed checkpoint: added 'module.' prefix to all keys")
+            else:
+                # 检查是否只需要移除 'module.' 前缀
+                unprefixed_keys = {k.replace('module.', '') for k in checkpoint_keys if k.startswith('module.')}
+                if unprefixed_keys == expected_keys or unprefixed_keys == set(model.module.state_dict().keys()): # <--- 修改点2: 增加备选条件
+                    new_state_dict = {k.replace('module.', ''): v for k, v in model_state_dict.items()}
+                    model_state_dict = new_state_dict
+                    print("🔄 Fixed checkpoint: removed 'module.' prefix from all keys")
+    
+
+
+        model.load_state_dict(model_state_dict)
+        
+
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         if scheduler and 'scheduler_state_dict' in ckpt:
             scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+        
+
+        #if rank == 0:
+        #    torch.set_rng_state(ckpt['rng_state'])
+        #    if ckpt.get('cuda_rng_state') is not None:
+        #        torch.cuda.set_rng_state(ckpt['cuda_rng_state'])
+        #    np.random.set_state(ckpt['numpy_rng_state'])
+        #    start_epoch = ckpt.get('epoch', -1) + 1
+        #    start_global_step = ckpt.get('global_step', 0)
+        #    print(f"✅ Resuming from epoch {start_epoch}")
+
         if rank == 0:
-            torch.set_rng_state(ckpt['rng_state'])
-            if ckpt.get('cuda_rng_state') is not None:
-                torch.cuda.set_rng_state(ckpt['cuda_rng_state'])
-            np.random.set_state(ckpt['numpy_rng_state'])
+            # 🔧 修复：安全地加载 RNG 状态
+            rng_state_to_load = ckpt.get('rng_state')
+            if rng_state_to_load is not None:
+                try:
+                    # 尝试加载 PyTorch 的 RNG 状态
+                    # 确保它是 torch.ByteTensor 类型
+                    if not isinstance(rng_state_to_load, torch.Tensor):
+                         print(f"⚠️ Warning: Loaded rng_state is not a tensor, skipping PyTorch RNG restore. Type: {type(rng_state_to_load)}")
+                    elif rng_state_to_load.dtype != torch.uint8: # torch.ByteTensor is torch.uint8
+                        print(f"⚠️ Warning: Loaded rng_state is not of dtype uint8, attempting conversion...")
+                        # 尝试转换，如果失败则跳过
+                        try:
+                            rng_state_to_load = rng_state_to_load.to(dtype=torch.uint8)
+                            torch.set_rng_state(rng_state_to_load)
+                            print("✅ PyTorch RNG state restored after conversion.")
+                        except Exception as e_convert:
+                             print(f"⚠️ Warning: Failed to convert rng_state, skipping PyTorch RNG restore. Error: {e_convert}")
+                    else:
+                        torch.set_rng_state(rng_state_to_load)
+                        print("✅ PyTorch RNG state restored.")
+                except Exception as e:
+                    print(f"⚠️ Warning: Failed to load PyTorch RNG state, continuing without it. Error: {e}")
+            else:
+                print("⚠️ Warning: 'rng_state' not found in checkpoint, using default RNG state.")
+
+
+            cuda_rng_state_to_load = ckpt.get('cuda_rng_state')
+            if cuda_rng_state_to_load is not None:
+                try:
+                    # 同样的检查适用于 CUDA RNG 状态
+                    if not isinstance(cuda_rng_state_to_load, torch.Tensor):
+                         print(f"⚠️ Warning: Loaded cuda_rng_state is not a tensor, skipping CUDA RNG restore. Type: {type(cuda_rng_state_to_load)}")
+                    elif cuda_rng_state_to_load.dtype != torch.uint8:
+                        print(f"⚠️ Warning: Loaded cuda_rng_state is not of dtype uint8, attempting conversion...")
+                        try:
+                            cuda_rng_state_to_load = cuda_rng_state_to_load.to(dtype=torch.uint8)
+                            torch.cuda.set_rng_state(cuda_rng_state_to_load)
+                            print("✅ CUDA RNG state restored after conversion.")
+                        except Exception as e_convert:
+                             print(f"⚠️ Warning: Failed to convert cuda_rng_state, skipping CUDA RNG restore. Error: {e_convert}")
+                    else:
+                        torch.cuda.set_rng_state(cuda_rng_state_to_load)
+                        print("✅ CUDA RNG state restored.")
+                except Exception as e:
+                     print(f"⚠️ Warning: Failed to load CUDA RNG state, continuing without it. Error: {e}")
+            else:
+                # print("CUDA RNG state not found in checkpoint, this is OK if CUDA was not used during saving.")
+                pass # 不打印，静默处理
+
+
+            np_rng_state_to_load = ckpt.get('numpy_rng_state')
+            if np_rng_state_to_load is not None:
+                try:
+                    np.random.set_state(np_rng_state_to_load)
+                    print("✅ NumPy RNG state restored.")
+                except Exception as e:
+                     print(f"⚠️ Warning: Failed to load NumPy RNG state, continuing without it. Error: {e}")
+            else:
+                 print("⚠️ Warning: 'numpy_rng_state' not found in checkpoint, using default NumPy RNG state.")
+
             start_epoch = ckpt.get('epoch', -1) + 1
             start_global_step = ckpt.get('global_step', 0)
             print(f"✅ Resuming from epoch {start_epoch}")

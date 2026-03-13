@@ -27,7 +27,10 @@ from typing import List
 
 from accelerate import Accelerator
 # Import your model definition (must define NanoporeVQModel)
-from .vq_model import NanoporeVQModel
+from .vqe_model_v1 import NanoporeVQEModel_V1
+from .vqe_model_v2 import NanoporeVQEModel_V2
+from .vqe_model_v3 import NanoporeVQEModel_V3
+
 
 
 def load_accelerate_checkpoint(model_ckpt_dir: str):
@@ -90,6 +93,7 @@ class VQETokenizer:
         model_ckpt: str = "nanopore_vq_tokenizer.pth",
         device: str = "cuda",
         token_batch_size: int = 8000,
+        model_type: int = 1
     ):
         # --- Device setup ---
         if device is None:
@@ -144,7 +148,15 @@ class VQETokenizer:
         print(f"🎯 Inferred: codebook_size={codebook_size}, dim={dim}, cnn_type={cnn_type}")
 
         # --- Instantiate model ---
-        self.model = NanoporeVQModel(codebook_size=codebook_size,cnn_type=cnn_type)
+        if model_type == 1:
+            self.model = NanoporeVQEModel_V1(codebook_size=codebook_size,cnn_type=cnn_type)
+        elif model_type == 2:
+            self.model = NanoporeVQEModel_V2(codebook_size=codebook_size,cnn_type=cnn_type)
+        elif model_type == 3:
+            self.model = NanoporeVQEModel_V3(codebook_size=codebook_size,cnn_type=cnn_type)
+        else:
+            raise RuntimeError(f"Unexpected model type: {model_type}")
+
 
         if not hasattr(self.model, 'cnn_stride'):
             raise AttributeError("Model must define 'cnn_stride' (total downsampling rate).")

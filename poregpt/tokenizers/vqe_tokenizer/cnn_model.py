@@ -93,13 +93,133 @@ class Conv1dWithMeanChannel(nn.Module):
         output = torch.cat([mean_channel, std_conv_out], dim=1) # [B, out_ch, L_out]
         return output
 
+class Conv1dWithMeanAndThresholdChannels(nn.Module):
+    """
+    Conv1d层，其中：
+    - 第0个输出通道是输入信号在卷积核窗口内的均值 (不可导)。
+    - 第1个输出通道表示输入信号在卷积核窗口内是否包含超出阈值的值 (不可导)。
+      逻辑：
+      - 如果窗口内存在任何值 > upper_threshold (默认2.99)，则输出 +1。
+      - 如果窗口内存在任何值 < lower_threshold (默认-2.99)，则输出 -1。
+      - 否则（所有值都在 [lower_threshold, upper_threshold] 范围内），输出 0。
+    - 其余的输出通道由标准卷积操作生成 (可导)。
+    
+    注意：此版本的 in_channels 固定为 1。
+    """
+    def __init__(self, out_channels, kernel_size, stride=1, padding=0, bias=True, 
+                 upper_threshold=2.99, lower_threshold=-2.99):
+        super(Conv1dWithMeanAndThresholdChannels, self).__init__()
+        self.in_channels = 1  # 固定为 1
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.upper_threshold = upper_threshold
+        self.lower_threshold = lower_threshold
+
+        if out_channels <= 0:
+            raise ValueError(f"out_channels 必须为正数，得到的是 {out_channels}")
+
+        # 专门用于计算均值的卷积层 (固定权重，不可导)
+        self.mean_conv = nn.Conv1d(
+            in_channels=1,
+            out_channels=1,  # 只需要一个输出通道来存放均值
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            bias=False # 不需要偏置
+        )
+        # 将权重设置为 1/kernel_size
+        with torch.no_grad():
+            self.mean_conv.weight.fill_(1.0 / kernel_size)
+        # 冻结 mean_conv 的参数
+        for p in self.mean_conv.parameters():
+            p.requires_grad = False
+
+        # 专门用于阈值判断的逻辑 (不可导)
+        # 不需要额外的可训练参数
+
+        # 我们需要至少2个通道来存放均值和阈值判断。如果 out_channels > 2，
+        # 对其余的 (out_channels - 2) 个通道执行标准卷积。
+        self.use_standard_conv = out_channels > 2
+        if self.use_standard_conv:
+            # 为其余 (out_channels - 2) 个通道创建标准卷积层
+            # 这个层的参数是可训练的 (requires_grad=True by default)
+            self.std_conv = nn.Conv1d(1, out_channels - 2, kernel_size, stride=stride, padding=padding, bias=bias)
+
+    def forward(self, x):
+        """
+        前向传播函数。
+
+        Args:
+            x (torch.Tensor): 输入张量，形状为 [Batch_Size, 1, Input_Length] (因为 in_channels 固定为 1)
+
+        Returns:
+            torch.Tensor: 输出张量，形状为 [Batch_Size, out_channels, Output_Length]
+                          其中第0个通道是局部均值 (不可导)，
+                               第1个通道是阈值判断结果 (1, -1, 0) (不可导)，
+                               其余通道是标准卷积结果 (可导)。
+        """
+        # --- 计算局部均值通道 (不可导) ---
+        # 直接使用预设权重的卷积层来计算均值
+        mean_channel = self.mean_conv(x) # [B, 1, L_out]
+        # 由于 mean_conv 的参数已冻结，且其操作是线性的，mean_channel 本身仍是计算图的一部分。
+        # 但我们希望它是固定的，所以 detach 它
+        mean_channel = mean_channel.detach() # [B, 1, L_out]
+
+        # --- 计算阈值判断通道 (不可导) ---
+        with torch.no_grad(): # 确保内部操作不计入计算图
+            batch_size, _, seq_len = x.shape
+            
+            if x.size(1) != 1:
+                raise ValueError(f"Expected input channels to be 1, got {x.size(1)}")
+                
+            # 使用 unfold 创建滑动窗口视图
+            x_padded = F.pad(x, (self.padding, self.padding), mode='constant', value=0) # 手动填充
+            x_unfolded = x_padded.unfold(dimension=-1, size=self.kernel_size, step=self.stride) # 再展开
+            B, C, L_out, K_size = x_unfolded.shape
+
+            # 检查窗口内是否有值 > upper_threshold 或 < lower_threshold
+            gt_mask = x_unfolded > self.upper_threshold
+            lt_mask = x_unfolded < self.lower_threshold
+
+            any_gt = gt_mask.any(dim=-1) # shape: (B, 1, L_out)
+            any_lt = lt_mask.any(dim=-1) # shape: (B, 1, L_out)
+
+            # 初始化输出张量
+            threshold_channel = torch.zeros((B, 1, L_out), dtype=x.dtype, device=x.device)
+
+            # 设置满足条件的位置
+            threshold_channel[any_gt] = 1.0
+            threshold_channel[any_lt & ~any_gt] = -1.0 # Set -1 only if not already set to +1
+
+            # detach 操作确保梯度不会流经这个不可导的逻辑
+            threshold_channel = threshold_channel.detach() # [B, 1, L_out]
+
+        # --- 构造最终输出 ---
+        if not self.use_standard_conv:
+            # 如果只需要2个输出通道，则直接返回均值和阈值判断通道
+            # 顺序：[mean_channel, threshold_channel]
+            output = torch.cat([mean_channel, threshold_channel], dim=1) # [B, 2, L_out]
+            return output
+
+        # --- 如果需要更多通道 ---
+        # 对输入x执行标准卷积，生成其余的 (out_channels - 2) 个通道
+        std_conv_out = self.std_conv(x) # [B, out_ch - 2, L_out]
+
+        # 将不可导的均值通道、不可导的阈值判断通道与可导的标准卷积结果通道拼接起来
+        # 顺序：[mean_channel, threshold_channel, std_conv_out...]
+        output = torch.cat([mean_channel, threshold_channel, std_conv_out], dim=1) # [B, out_ch, L_out]
+
+        return output
+
 class NanoporeCNNModel(nn.Module):
     """Nanopore 信号重建用纯卷积自编码器（无 VQ）。"""
 
-    def __init__(self, cnn_type: Literal[0, 1, 2,3,4,5,6,7,8,9] = 1) -> None:
+    def __init__(self, cnn_type: Literal[0, 1, 2,3,4,5,6,7,8,9,10] = 1) -> None:
         super().__init__()
 
-        if cnn_type not in (0, 1, 2,3,4,5,6,7,8,9):
+        if cnn_type not in (0, 1, 2,3,4,5,6,7,8,9,10):
             raise ValueError(f"`cnn_type` must be 0, 1 or 2,3,4,5 got {cnn_type}.")
 
         self.cnn_type: int = cnn_type
@@ -163,6 +283,12 @@ class NanoporeCNNModel(nn.Module):
             self.stride = 12
             self.receptive_field = 65
             self.RF = 65
+        elif cnn_type == 10:
+            self._build_cnn_type10()
+            self.out_channels = 256
+            self.stride = 5
+            self.receptive_field = 33
+            self.RF = 33
 
 
     # 现代 CNN  遵循“Conv → BN → Act” 的惯例。
@@ -628,6 +754,48 @@ class NanoporeCNNModel(nn.Module):
             nn.Conv1d(64, 1, kernel_size=5,padding=2,bias=True)
         )
 
+    def _build_cnn_type10(self) -> None:
+        """构建 cnn_type=1 的 encoder：1 → 16 → 32 → 64（严格对称）
+        Modified: First layer has the first channel as local mean.
+        """
+        self.encoder = nn.Sequential(
+            # Layer 1: 1 → 16, 第一个通道(kernel_size=5区域内的均值)，其余15个通道来自标准卷积
+            # 注意：调用时不再需要传入 in_channels，因为它已被固定为 1
+            Conv1dWithMeanAndThresholdChannels(out_channels=64, kernel_size=5, stride=1, padding=2,bias=False,upper_threshold=4.99,lower_threshold=-4.99),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+
+            # Layer 2: 16 → 32
+            nn.Conv1d(64, 128, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+
+            # Layer 3: 32 → 64, stride=5, RF=33
+            nn.Conv1d(128, 256, kernel_size=25, stride=5, padding=12, bias=False),
+            nn.BatchNorm1d(256),
+        )
+        """构建 cnn_type=1 的 decoder（严格对称：64 → 32 → 16 → 1）"""
+        self.decoder = nn.Sequential(
+            # Inverse of encoder Layer 3: 64 → 32
+            nn.ConvTranspose1d(
+                in_channels=256,
+                out_channels=128,
+                kernel_size=25,
+                stride=5,
+                padding=12,
+                output_padding=0,
+                bias=False,
+            ),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+
+            # Inverse of encoder Layer 2: 32 → 16
+            nn.Conv1d(128, 64, kernel_size=5, padding=2,bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Inverse of encoder Layer 1: 16 → 1
+            nn.Conv1d(64, 1, kernel_size=5, padding=2,bias=True)
+        )
 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

@@ -3,7 +3,7 @@
 # Industrial-grade training pipeline for nanopore raw signal tokenization using Vector Quantization.
 # Supports distributed training (DDP), dynamic logging, checkpointing, and independent evaluation dataset.
 # This version uses Hugging Face Accelerate for simplified multi-GPU/mixed precision training.
-
+import math
 import os
 import torch
 import torch.nn as nn
@@ -24,14 +24,45 @@ from accelerate import Accelerator, DistributedType
 # Relative imports from the same package
 # Note: The relative imports might need adjustment depending on your package structure.
 # If this script is run directly, you might need to add the parent directory to sys.path.
-try:
-    from .dataset import NanoporeSignalDataset
-    from .vq_model import NanoporeVQModel
-except ImportError:
-    # Fallback for direct execution
-    from dataset import NanoporeSignalDataset
-    from vq_model import NanoporeVQModel
+from .dataset import NanoporeSignalDataset
+from .vqe_model_v1 import NanoporeVQEModel_V1
+from .vqe_model_v2 import NanoporeVQEModel_V2
+from .vqe_model_v3 import NanoporeVQEModel_V3
+from accelerate import InitProcessGroupKwargs
+from datetime import timedelta
 
+
+def write_runtime_json(runtime_dict, filename="runtime.json"):
+    """
+    将字典写入指定的 json 文件。
+    """
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            # indent=4 让生成的 JSON 文件易于阅读
+            # ensure_ascii=False 确保中文字符能正常显示
+            json.dump(runtime_dict, f, indent=4, ensure_ascii=False)
+        print(f"成功更新 {filename}")
+    except Exception as e:
+        print(f"写入文件时出错: {e}")
+
+def read_runtime_json(filename="runtime.json"):
+    """
+    从 json 文件读取内容并返回字典。
+    如果文件不存在或损坏，返回一个空字典。
+    """
+    if not os.path.exists(filename):
+        print(f"提示: {filename} 不存在，返回空配置。")
+        return None
+
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        print(f"错误: {filename} 格式损坏。")
+        return None
+    except Exception as e:
+        print(f"读取文件时出错: {e}")
+        return None
 
 # =============================================================================
 # Utility Functions
@@ -48,6 +79,7 @@ def log_and_save(
     avg_comit_loss: float,
     avg_diver_loss: float,
     avg_ortho_loss: float,
+    avg_rperc_ratio: float,
     codebook_usage: float,
     loss_csv_path: str,
     lr: float,
@@ -88,8 +120,8 @@ def log_and_save(
             f"Total: {avg_total_loss:>8.6f} | "
             f"Recon: {avg_recon_loss:>8.6f} | "
             f"Comit: {avg_comit_loss:>8.6f} | "
-            f"Ortho: {avg_ortho_loss:>8.6f} | "
-            f"Diver: {avg_diver_loss:>3.2f} | "
+            f"Rperc: {avg_rperc_ratio:>8.6f} | "
+            #f"Diver: {avg_diver_loss:>3.2f} | "
             f"Usage: {codebook_usage*100:>3.1f}% | "
             f"LR: {lr:>7.2e} |"
         )
@@ -115,6 +147,8 @@ def save_full_checkpoint(
     spoch: int,
     global_step: int,
     cnn_type: int,
+    model_type: int,
+    dynamic_commitment_weight: float,
     accelerator: Accelerator
 ):
     """
@@ -132,22 +166,23 @@ def save_full_checkpoint(
             'spoch': spoch,
             'global_step': global_step,
             'cnn_type': cnn_type,
+            "model_type": model_type,
+            'dynamic_commitment_weight': dynamic_commitment_weight,
         }
-        meta_path = path.replace('.pth', '_metadata.json')
+        meta_path = os.path.join(path, "metadata.json")
         with open(meta_path, 'w') as f:
             json.dump(metadata, f)
-
 
 def load_checkpoint_metadata(path: str):
     """
     Load metadata associated with a checkpoint.
     """
-    meta_path = path.replace('.pth', '_metadata.json')
+    # 使用 os.path.join 来安全地拼接路径
+    meta_path = os.path.join(path, "metadata.json")
     if os.path.exists(meta_path):
         with open(meta_path, 'r') as f:
             return json.load(f)
     return None
-
 
 
 
@@ -157,6 +192,7 @@ def load_checkpoint_metadata(path: str):
 
 def vqe_train(
     train_npy_dir: str,
+    model_type: int = 1,
     evaluation_npy_dir: Optional[str] = None,
     output_model_path: str = "nanopore_vq_tokenizer.pth",
     batch_size: int = 16, # Note: This now refers to the device_micro_batch_size
@@ -169,7 +205,11 @@ def vqe_train(
     prefetch_factor: int = 128,
     val_ratio: float = 0.001,
     do_evaluate: bool = True,
+    use_dynamic_commitment_weight: bool = True,
     commitment_weight: float = 1.0,
+    commitment_weight_lr: float =0.01,
+    commitment_weight_freeze_steps: int = 20000,
+    commitment_weight_rpc: float = 1.0,
     codebook_diversity_loss_weight: float = 1.0,
     orthogonal_reg_weight: float = 1.0,
     loss_log_interval: int = 10,
@@ -219,8 +259,12 @@ def vqe_train(
             total_loss = recon_loss + comit_loss * commitment_weight
         DWA weights are only recorded in logs/CSV/W&B for analysis.
     """
+    if commitment_weight_rpc < 0.0001:
+        commitment_weight_rpc = 0.0001
+
     print_training_args(
         train_npy_dir=train_npy_dir,
+        model_type=model_type,
         evaluation_npy_dir=evaluation_npy_dir,
         output_model_path=output_model_path,
         lr=lr,
@@ -233,10 +277,14 @@ def vqe_train(
         val_ratio=val_ratio,
         do_evaluate=do_evaluate,
         commitment_weight=commitment_weight,
+        commitment_weight_lr=commitment_weight_lr,
         codebook_diversity_loss_weight=codebook_diversity_loss_weight,
         orthogonal_reg_weight=orthogonal_reg_weight,
         loss_csv_path=loss_csv_path,
         use_wandb=use_wandb,
+        use_dynamic_commitment_weight=use_dynamic_commitment_weight,
+        commitment_weight_freeze_steps=commitment_weight_freeze_steps,
+        commitment_weight_rpc=commitment_weight_rpc,
         wandb_project=wandb_project,
         wandb_name=wandb_name,
         lr_scheduler_type=lr_scheduler_type,
@@ -259,6 +307,7 @@ def vqe_train(
         dataset_logic_chunk_size=dataset_logic_chunk_size,
     )
 
+
     # Calculate accumulation steps based on global and micro batch sizes
     effective_micro_batch = device_micro_batch_size * (1 if cpu else torch.cuda.device_count() if torch.cuda.is_available() else 1) # Estimate num_processes before accelerator init
     accumulation_steps = global_batch_size // effective_micro_batch
@@ -269,7 +318,8 @@ def vqe_train(
             f"device_micro_batch_size ({device_micro_batch_size}). "
             f"Minimum global_batch_size required is {effective_micro_batch}."
         )
-
+    # 设置一个足够长的超时时间，比如 2 小时 (7200秒)
+    process_group_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=1800))
     # Initialize Accelerator
     # This handles device placement, distributed setup, mixed precision, and gradient accumulation automatically.
     accelerator = Accelerator(
@@ -294,6 +344,9 @@ def vqe_train(
                 "global_batch_size":global_batch_size,
                 "update_loss_weight_every": update_loss_weight_every,
                 "commitment_weight": commitment_weight,
+                "commitment_weight_lr": commitment_weight_lr,
+                "commitment_weight_freeze_steps":commitment_weight_freeze_steps,
+                "commitment_weight_rpc":commitment_weight_rpc,
                 "codebook_diversity_loss_weight": codebook_diversity_loss_weight,
                 "orthogonal_reg_weight": orthogonal_reg_weight,
                 "world_size": accelerator.num_processes, # Changed from 'world_size'
@@ -407,140 +460,273 @@ def vqe_train(
             entropy_val, max_entropy
         )
 
-    def evaluate_codebook_metrics_v2():
+    def evaluate_codebook_metrics_v3_old():
         """Evaluate codebook usage, top-k concentration, and entropy on validation set."""
         if val_loader is None:
-            return 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-        # 关键：获取解包后的模型
-        #unwrapped_model = accelerator.unwrap_model(model)
-        #unwrapped_model.eval()
-        #model.eval()
-
-        # --- 关键修改 1: 获取未包装的模型 ---
-        # 这样模型就变成了普通模型，不会尝试进行 GPU 通信
-        model_for_eval = accelerator.unwrap_model(model)
-        model_for_eval.eval()
-
-        used_codes = set()
-        token_counts = np.zeros(codebook_size, dtype=np.int64)
+            return 0,0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        used_code_n = 0
+        usage_ratio = 0.0
         total_tokens = 0
-
-        with torch.no_grad():
-            pbar = tqdm(val_loader, desc=f"Eval")
-            for batch in pbar:
-                x = batch # No need to call .to(device), Accelerate handles it
-                # Ensure model input is correctly shaped if needed (e.g., adding batch dim)
-                # Example: if x.shape is [seq_len, feat_dim] and model expects [batch, seq_len, feat_dim]
-                # x = x.unsqueeze(0) # This adds the batch dimension
-                # However, since we are using batches from DataLoader, x should already have a batch dimension
-                # Assuming x shape is [batch_size, seq_len, feat_dim]
-                
-                # The model expects the correct shape; ensure your dataset/dataloader provides it.
-                # If your raw data from dataset has shape [seq_len, feat_dim], DataLoader makes it [device_micro_batch_size, seq_len, feat_dim]
-                # which should be fine for a model expecting [batch, seq_len, feat_dim].
-                # 关键：确保输入数据类型与模型参数类型匹配
-                #expected_dtype = next(unwrapped_model.parameters()).dtype
-                #if x.dtype != expected_dtype:
-                #    x = x.to(expected_dtype)
-                #print("---")  
-                #_, indices, _, _ = model(x) # Model input is handled by Accelerate
-                            # --- 关键修改 2: 确保数据在主进程的设备上 ---
-                # 虽然 Accelerate 通常会处理，但显式指定更安全
-                x = x.to(accelerator.device)
-                # --- 关键修改 3: 使用未包装的模型 ---
-                # 这一行不会再卡住，因为 model_for_eval 是普通模型
-                _, indices, _, _ = model_for_eval(x)
-                #print("+++")
-                indices = indices.cpu().numpy().flatten()
-                used_codes.update(indices.tolist())
-                total_tokens += indices.size
-                for idx in indices:
-                    token_counts[idx] += 1
-
-        usage_ratio = len(used_codes) / codebook_size
         top1_ratio = top3_ratio = top5_ratio = top7_ratio = top9_ratio = top10_ratio = 0.0
         entropy_val = 0.0
-        max_entropy = np.log2(codebook_size)
+        max_entropy = np.log2(codebook_size) if codebook_size > 0 else 0.0
+        global_recon_loss_val = 0.0
+        global_comit_loss_val = 0.0
 
-        if total_tokens > 0:
-            sorted_counts = np.sort(token_counts)[::-1]
+        # --- 新增：评估前的 Batch 数量同步校验 ---
+        local_len = torch.tensor([len(val_loader)], device=accelerator.device)
+        all_lens = accelerator.gather(local_len)
+        
+        if accelerator.is_main_process:
+            counts = all_lens.tolist()
+            print(f"\n[Eval Step {global_step}] Batch distribution: {counts}")
+            if len(set(counts)) > 1:
+                print(f"❌ CRITICAL WARNING: Inconsistent batch counts detected! Process may hang at gather().")
+        # ---------------------------------------
+        model.eval()
+    
+        # 存储局部结果的列表
+        all_indices = []
+        local_recon_loss = 0.0
+        local_comit_loss = 0.0
+        num_batches = 0
+        # 初始化计数器 (在 GPU 上)
+        token_counts = torch.zeros(codebook_size, device=accelerator.device)
+        with torch.no_grad():
+            # 1. 仅在主进程创建 tqdm 进度条，禁用其他进程的进度条
+            # disable=not accelerator.is_main_process: 这是分布式训练的标配。它保证了只有 Rank 0 会打印那行进度条，其他 7 个进程默默干活。
+            # leave=False: 验证集通常每隔一段时间跑一次，设置为 False 可以让验证完后的进度条消失，不污染你的训练日志。
+            # 
+            pbar = tqdm(
+                val_loader,
+                desc=f"Eval Step {global_step}",
+                disable=not accelerator.is_main_process,
+                leave=False # 评估完成后自动清除，保持终端整洁
+            )
+            for i, batch in enumerate(pbar):
+                x = batch # 已被 accelerator 处理到正确设备
+                # 使用原模型（分布式包装后的），获取当前卡上的结果
+                recon, indices, _, loss_breakdown = model(x)
+                recon_loss = F.mse_loss(recon, x)
+                local_recon_loss += recon_loss.item()
+                local_comit_loss += loss_breakdown.commitment.item()
+                num_batches += 1
+                # 直接累加计数，不存原始 indices
+                flat_indices = indices.flatten()
+                token_counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float))
+                # 建议：每 100 个 batch 同步一次，维持分布式系统的“心跳”
+                #if i % 100 == 0:
+                #    accelerator.wait_for_everyone()
+        # 循环结束后，一次性同步计数器
+        global_token_counts = accelerator.reduce(token_counts, reduction="sum")
+        # --- 关键：聚合所有进程的数据 ---
+        # 1. 聚合损失 (计算全局平均)
+        # 将标量转换为 Tensor 以便 gather
+        metrics = torch.tensor([local_recon_loss, local_comit_loss, float(num_batches)], device=accelerator.device)
+        gathered_metrics = accelerator.gather(metrics).view(-1, 3) # [num_processes, 3]
+        
+        global_recon_loss = gathered_metrics[:, 0].sum() / gathered_metrics[:, 2].sum()
+        global_comit_loss = gathered_metrics[:, 1].sum() / gathered_metrics[:, 2].sum()
 
-            base_ratio = 1/codebook_size
-            top1_ratio = sorted_counts[0] / total_tokens if len(sorted_counts) > 0 else 0.0
-            top3_ratio = sorted_counts[2] / total_tokens if len(sorted_counts) > 2 else 0.0
-            top5_ratio = sorted_counts[4] / total_tokens if len(sorted_counts) > 4 else 0.0
-            top7_ratio = sorted_counts[6] / total_tokens if len(sorted_counts) > 6 else 0.0
-            top9_ratio = sorted_counts[8] / total_tokens if len(sorted_counts) > 8 else 0.0
+        # 2. 聚合 Indices (用于计算 codebook usage 和 entropy)
+        local_indices = torch.cat(all_indices)
+        # 使用 gather_for_metrics 自动处理分布式采样可能产生的重复数据
+        global_indices = accelerator.gather_for_metrics(local_indices)
 
-            top1_ratio = top1_ratio/base_ratio
-            top3_ratio = top3_ratio/base_ratio
-            top5_ratio = top5_ratio/base_ratio
-            top7_ratio = top7_ratio/base_ratio
-            top9_ratio = top9_ratio/base_ratio
 
-            top10_ratio = float(sorted_counts[:min(9, codebook_size)].sum()) / total_tokens if len(sorted_counts) > 9 else 0.0
-            top10_ratio = top10_ratio/base_ratio
+        # --- 后期处理（仅在主进程计算统计量） ---
+        if accelerator.is_main_process:
+            indices_np = global_indices.cpu().numpy()
+            total_tokens = indices_np.size
+            
+            # 计算 Codebook 统计
+            token_counts = np.bincount(indices_np, minlength=codebook_size)
+            used_code_n = np.count_nonzero(token_counts)
+            usage_ratio = used_code_n / codebook_size
+            top1_ratio = top3_ratio = top5_ratio = top7_ratio = top9_ratio = top10_ratio = 0.0
+            entropy_val = 0.0
+            max_entropy = np.log2(codebook_size)
+            if total_tokens > 0:
+                sorted_counts = np.sort(token_counts)[::-1]
+                base_ratio = 1/codebook_size
+                top1_ratio = sorted_counts[0] / total_tokens if len(sorted_counts) > 0 else 0.0
+                top3_ratio = sorted_counts[2] / total_tokens if len(sorted_counts) > 2 else 0.0
+                top5_ratio = sorted_counts[4] / total_tokens if len(sorted_counts) > 4 else 0.0
+                top7_ratio = sorted_counts[6] / total_tokens if len(sorted_counts) > 6 else 0.0
+                top9_ratio = sorted_counts[8] / total_tokens if len(sorted_counts) > 8 else 0.0
 
-            prob = token_counts / total_tokens
-            nonzero_prob = prob[prob > 0]
-            if nonzero_prob.size > 0:
-                entropy_val = -np.sum(nonzero_prob * np.log2(nonzero_prob))
-        model_for_eval.train()
-        #model.train()
-        return (
-            usage_ratio, total_tokens,
-            top1_ratio, top3_ratio, top5_ratio, top7_ratio, top9_ratio, top10_ratio,
-            entropy_val, max_entropy
+                top1_ratio = top1_ratio/base_ratio
+                top3_ratio = top3_ratio/base_ratio
+                top5_ratio = top5_ratio/base_ratio
+                top7_ratio = top7_ratio/base_ratio
+                top9_ratio = top9_ratio/base_ratio
+
+                top10_ratio = float(sorted_counts[:min(9, codebook_size)].sum()) / total_tokens if len(sorted_counts) > 9 else 0.0
+                top10_ratio = top10_ratio/base_ratio
+
+                prob = token_counts / total_tokens
+                nonzero_prob = prob[prob > 0]
+                if nonzero_prob.size > 0:
+                    entropy_val = -np.sum(nonzero_prob * np.log2(nonzero_prob))
+            model.train()
+            return (
+                used_code_n, usage_ratio, total_tokens,
+                top1_ratio, top3_ratio, top5_ratio, top7_ratio, top9_ratio, top10_ratio,
+                entropy_val, max_entropy, global_recon_loss.item(), global_comit_loss.item()
+            )
+        else:
+            model.train()
+            return None
+    def evaluate_codebook_metrics_v3():
+        """Evaluate codebook usage, top-k concentration, and entropy on validation set."""
+        if val_loader is None:
+            return 0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
+        # 初始化变量
+        local_recon_loss = 0.0
+        local_comit_loss = 0.0
+        num_batches = 0
+        # 在 GPU 上初始化计数器
+        token_counts_gpu = torch.zeros(codebook_size, device=accelerator.device)
+
+        # 校验 Batch 分布
+        local_len = torch.tensor([len(val_loader)], device=accelerator.device)
+        all_lens = accelerator.gather(local_len)
+        if accelerator.is_main_process:
+            print(f"\n[Eval Step {global_step}] Batch distribution: {all_lens.tolist()}")
+
+        model.eval()
+        with torch.no_grad():
+            pbar = tqdm(val_loader, desc=f"Eval Step {global_step}", 
+                        disable=not accelerator.is_main_process, leave=False)
+            
+            for i, batch in enumerate(pbar):
+                x = batch
+                recon, indices, _, loss_breakdown = model(x)
+                
+                recon_loss = F.mse_loss(recon, x)
+                local_recon_loss += recon_loss.item()
+                local_comit_loss += loss_breakdown.commitment.item()
+                num_batches += 1
+                
+                # 核心优化：直接在 GPU 上统计，不需要 cat all_indices
+                flat_indices = indices.flatten()
+                token_counts_gpu.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float))
+
+        # --- 分布式聚合 ---
+        # 1. 聚合计数器 (求和)
+        global_counts_tensor = accelerator.reduce(token_counts_gpu, reduction="sum")
+        
+        # 2. 聚合损失
+        metrics = torch.tensor([local_recon_loss, local_comit_loss, float(num_batches)], device=accelerator.device)
+        gathered_metrics = accelerator.gather(metrics).view(-1, 3)
+
+        # --- 后期处理（仅在主进程计算） ---
+        if accelerator.is_main_process:
+            # 计算全局平均 Loss
+            total_batches_all = gathered_metrics[:, 2].sum()
+            global_recon_loss = (gathered_metrics[:, 0].sum() / total_batches_all).item()
+            global_comit_loss = (gathered_metrics[:, 1].sum() / total_batches_all).item()
+
+            # 将计数器转到 CPU 供计算
+            token_counts_np = global_counts_tensor.cpu().numpy()
+            total_tokens = np.sum(token_counts_np)
+            
+            used_code_n = np.count_nonzero(token_counts_np)
+            usage_ratio = used_code_n / codebook_size
+            
+            entropy_val = 0.0
+            top1_ratio = top3_ratio = top5_ratio = top7_ratio = top9_ratio = top10_ratio = 0.0
+            
+            if total_tokens > 0:
+                sorted_counts = np.sort(token_counts_np)[::-1]
+                base_ratio = 1.0 / codebook_size
+                
+                # 计算 Top-N 集中度
+                def get_ratio(rank):
+                    return (sorted_counts[rank-1] / total_tokens) / base_ratio if len(sorted_counts) >= rank else 0.0
+
+                top1_ratio = get_ratio(1)
+                top3_ratio = get_ratio(3)
+                top5_ratio = get_ratio(5)
+                top7_ratio = get_ratio(7)
+                top9_ratio = get_ratio(9)
+                top10_ratio = (np.sum(sorted_counts[:10]) / total_tokens) / base_ratio if len(sorted_counts) >= 10 else 0.0
+
+                # 计算熵
+                prob = token_counts_np / total_tokens
+                nz_prob = prob[prob > 0]
+                entropy_val = -np.sum(nz_prob * np.log2(nz_prob))
+
+            model.train()
+            return (
+                used_code_n, usage_ratio, int(total_tokens),
+                top1_ratio, top3_ratio, top5_ratio, top7_ratio, top9_ratio, top10_ratio,
+                entropy_val, np.log2(codebook_size), global_recon_loss, global_comit_loss
+            )
+        else:
+            model.train()
+            return None
+
+    if do_evaluate and evaluation_npy_dir and os.path.isdir(evaluation_npy_dir) and val_ratio > 0: # Only setup eval on main process initially
+        print(f"✅ Using independent evaluation dataset: {evaluation_npy_dir}")
+        val_dataset = NanoporeSignalDataset(shards_dir=evaluation_npy_dir,logic_chunk_size=dataset_logic_chunk_size)
+        actual_val_size = max(1, int(val_ratio * len(val_dataset)))
+        np.random.seed(42)
+        indices = np.random.choice(len(val_dataset), size=actual_val_size, replace=False)
+        val_subset = torch.utils.data.Subset(val_dataset, indices)
+        val_loader = DataLoader(
+            val_subset,
+            batch_size=device_micro_batch_size,
+            shuffle=False,
+            num_workers=max(2, num_workers // 2),
+            pin_memory=True,
+            drop_last=True
         )
-
-    if do_evaluate and accelerator.is_main_process: # Only setup eval on main process initially
-        if evaluation_npy_dir and os.path.isdir(evaluation_npy_dir):
-            print(f"✅ Using independent evaluation dataset: {evaluation_npy_dir}")
-            val_dataset = NanoporeSignalDataset(shards_dir=evaluation_npy_dir,logic_chunk_size=dataset_logic_chunk_size)
-        else:
-            print(f"⚠️ No evaluation_npy_dir. Using {val_ratio:.1%} of training data for eval.")
-            val_dataset = train_dataset
-        if val_ratio > 0:
-            actual_val_size = max(1, int(val_ratio * len(val_dataset)))
-            np.random.seed(42)
-            indices = np.random.choice(len(val_dataset), size=actual_val_size, replace=False)
-            val_subset = torch.utils.data.Subset(val_dataset, indices)
-            val_loader = DataLoader(
-                val_subset,
-                batch_size=device_micro_batch_size,
-                shuffle=False,
-                num_workers=max(2, num_workers // 2),
-                pin_memory=True,
-                drop_last=True
-            )
-            # Prepare val_loader with Accelerate if needed for consistency
-            #val_loader = accelerator.prepare(val_loader) # Often not necessary for eval loader, but can be done
-        else:
-            val_loader = DataLoader(
-                val_dataset,
-                batch_size=device_micro_batch_size, # Use same micro-batch size
-                shuffle=False,
-                num_workers=max(2, num_workers // 2),
-                pin_memory=True,
-                drop_last=True
-            )
-            #val_loader = accelerator.prepare(val_loader) # Often not necessary for eval loader
-
-
+        # 关键：必须 prepare，让 Accelerate 分发数据分片
+        val_loader = accelerator.prepare(val_loader)
     # ========================
     # Model & Optimizer & Scheduler Preparation
     # ========================
-    model = NanoporeVQModel(
-        codebook_size=codebook_size,
-        commitment_weight=commitment_weight,
-        codebook_diversity_loss_weight=codebook_diversity_loss_weight,
-        orthogonal_reg_weight=orthogonal_reg_weight,
-        cnn_type=cnn_type,
-        init_codebook_path=init_codebook_path,
-        cnn_checkpoint_path = cnn_checkpoint_path,
-        freeze_cnn = freeze_cnn,
-        learnable_codebook=learnable_codebook
-    )
+    if model_type == 1:
+        model = NanoporeVQEModel_V1(
+            codebook_size=codebook_size,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            cnn_type=cnn_type,
+            init_codebook_path=init_codebook_path,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+            learnable_codebook=learnable_codebook
+        )
+    elif model_type == 2:
+        model = NanoporeVQEModel_V2(
+            codebook_size=codebook_size,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            cnn_type=cnn_type,
+            init_codebook_path=init_codebook_path,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+            learnable_codebook=learnable_codebook
+        )
+    elif model_type == 3:
+        model = NanoporeVQEModel_V3(
+            codebook_size=codebook_size,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            cnn_type=cnn_type,
+            init_codebook_path=init_codebook_path,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+            learnable_codebook=learnable_codebook,
+        )
+    else:
+        print("error model type. exit")
+        return 
     # No need to manually call .to(device) or wrap with DDP, Accelerate handles it
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -627,21 +813,50 @@ def vqe_train(
     # ========================
     start_epoch = start_spoch = start_global_step = 0
     if checkpoint_path and os.path.isdir(checkpoint_path):
-        if accelerator.is_main_process:
-            print(f"📥 Loading checkpoint from: {checkpoint_path}")
-        # Load state using Accelerate. This loads model, optimizer, scheduler, and RNG states.
-        accelerator.load_state(checkpoint_path)
-        # Load metadata if available
+        # 1. 首先检查 metadata.json 是否存在且完整
         metadata = load_checkpoint_metadata(checkpoint_path)
         if metadata:
-            start_epoch = metadata.get('epoch', -1) + 1
-            start_spoch = metadata.get('spoch', -1) + 1
-            start_global_step = metadata.get('global_step', 0)
-            if accelerator.is_main_process:
-                print(f"✅ Resuming from epoch {start_epoch}, spoch {start_spoch}, global_step {start_global_step}")
+            # 定义恢复训练所必需的元数据键
+            REQUIRED_METADATA_KEYS = {'epoch', 'spoch', 'global_step'}
+            # 2. 检查 metadata 是否包含所有必需的键
+            missing_keys = REQUIRED_METADATA_KEYS - metadata.keys()
+            if not missing_keys:
+                # 所有必需的键都存在
+                try:
+                    if accelerator.is_main_process:
+                        print(f"📥 Loading checkpoint state and metadata from: {checkpoint_path}")
+                    # 4. 解析所有必需的元数据信息
+                    # 由于前面已确认键存在，这里可以直接访问
+                    start_epoch = metadata['epoch'] + 1
+                    start_spoch = metadata['spoch'] + 1
+                    start_global_step = metadata['global_step']
+                    model_type = metadata['model_type']
+                    dynamic_commitment_weight = metadata.get('dynamic_commitment_weight', commitment_weight)
+                    if accelerator.is_main_process:
+                        print(f"✅ Successfully resumed from epoch {start_epoch}, spoch {start_spoch}, global_step {start_global_step}")
+                    # 3. 加载加速器状态 (模型, 优化器等)
+                    accelerator.load_state(checkpoint_path)
+                    # 标记为加载成功
+                    load_successful = True 
+                except Exception as e:
+                    # 加速器状态加载失败
+                    if accelerator.is_main_process:
+                        print(f"❌ Failed to load checkpoint state from {checkpoint_path}, despite valid metadata. Error: {e}. Starting from scratch.")
+            else:
+                # metadata.json 存在，但缺少必要的键
+                if accelerator.is_main_process:
+                    print(f"❌ metadata.json exists but is missing required keys: {missing_keys}. Cannot resume safely. Starting from scratch.")
         else:
+            # metadata.json 文件不存在
             if accelerator.is_main_process:
-                print("⚠️ Checkpoint loaded, but no metadata found. Starting from scratch.")
+                print(f"❌ metadata.json not found in {checkpoint_path}. Cannot verify checkpoint integrity. Starting from scratch.")
+    else:
+        if accelerator.is_main_process:
+            print("⚠️ No checkpoint path provided or path is not a directory. Starting from scratch.") 
+
+
+
+
     if  accelerator.is_main_process: 
         print(f"Gradient Accumulation Steps: {accumulation_steps}")
         print(f"Num Processes (GPUs): {accelerator.num_processes}")
@@ -687,7 +902,10 @@ def vqe_train(
     log_dict = {}
 
     wandb_total_tokens = 0
+    wandb_eval_recon_loss = 0
+    wandb_eval_comit_loss = 0
     wandb_codebook_usage = 0
+    wandb_codebook_used  = 0
     wandb_codebook_top1_ratio = 0 
     wandb_codebook_top3_ratio = 0
     wandb_codebook_top5_ratio = 0
@@ -696,6 +914,21 @@ def vqe_train(
     wandb_codebook_top10_ratio = 0 
     wandb_codebook_entropy = 0
     wandb_codebook_max_entropy = 0
+
+
+    if use_dynamic_commitment_weight:
+        init_commitment_weight = commitment_weight
+        dynamic_commitment_weight = init_commitment_weight
+    else:
+        init_commitment_weight = commitment_weight
+        dynamic_commitment_weight = init_commitment_weight
+
+    target_commitment_weight = init_commitment_weight 
+
+    runtime_dict = {
+        "target_commitment_weight":target_commitment_weight
+    } 
+    write_runtime_json(runtime_dict)
 
     train_start_time = time.time()
     for epoch in range(start_epoch, num_epochs):
@@ -723,12 +956,16 @@ def vqe_train(
                 diver_loss = loss_breakdown.codebook_diversity
                 ortho_loss = loss_breakdown.orthogonal_reg
                 # 💡 ACTUAL LOSS: Fixed weights. DWA is NOT applied here.
-                total_loss = recon_loss + comit_loss * commitment_weight
+                total_loss = recon_loss + comit_loss * dynamic_commitment_weight
 
                 # Scale the loss by the number of accumulation steps for averaging
                 # Accelerate's backward function handles gradient scaling for mixed precision automatically
                 # The loss is automatically scaled by 1/accumulation_steps inside the context if needed.
                 accelerator.backward(total_loss) # Pass the unscaled loss
+
+                # 梯度裁剪：必须在 step 之前，且在 accumulate 块内
+                if accelerator.sync_gradients and gradient_clipping is not None:
+                    accelerator.clip_grad_norm_(model.parameters(), gradient_clipping)
                 # 只在梯度累积完成后执行优化器步骤
                 #if accelerator.sync_gradients:
                 # 执行梯度裁剪（如果启用）
@@ -747,22 +984,29 @@ def vqe_train(
             if accelerator.sync_gradients:
                 # These happen after a full parameter update
                 global_step += 1 # Increment global step for every micro-step processed
-
-                # 只在梯度累积完成后执行裁剪（与优化器步骤同步）
-                accelerator.clip_grad_norm_(model.parameters(), 1.0)  # max_norm=1.0
-                
                 g_recon = recon_loss.item() # Get value from last micro-step
                 g_comit = comit_loss.item()
                 g_ortho = ortho_loss.item()
                 g_diver = diver_loss.item()
                 g_total = total_loss.item()
 
-
-
-
                 # Log metrics (main process only)
                 if accelerator.is_main_process:
                     current_lr = optimizer.param_groups[0]['lr']
+                    # 为了避免log10(0)的问题，通常会给一个小的epsilon值
+                    epsilon = 1e-8
+                    # 计算log10值，确保非负值
+                    g_recon_log10 = math.log10(g_recon + epsilon) if g_recon > 0 else math.log10(epsilon)
+                    g_comit_log10 = math.log10(g_comit + epsilon) if g_comit > 0 else math.log10(epsilon)
+                    g_recon_per_comit = g_recon/(g_comit + epsilon)
+                    lr_log10 = math.log10(current_lr + epsilon)
+                    expected_commitment_weight = 0
+                    if use_dynamic_commitment_weight and global_step > commitment_weight_freeze_steps:
+                        #expected_commitment_weight = target_commitment_weight
+                        expected_commitment_weight = g_recon_per_comit/commitment_weight_rpc 
+                        if dynamic_commitment_weight < expected_commitment_weight:
+                            dynamic_commitment_weight += (expected_commitment_weight - dynamic_commitment_weight)*commitment_weight_lr
+
                     log_and_save(
                         epoch=epoch,
                         global_step=global_step,
@@ -775,21 +1019,29 @@ def vqe_train(
                         avg_comit_loss=g_comit,
                         avg_diver_loss=g_diver,
                         avg_ortho_loss=g_ortho,
+                        avg_rperc_ratio=g_recon_per_comit,
                         codebook_usage=wandb_codebook_usage, # Placeholder, updated later if eval runs
                         loss_csv_path=loss_csv_path,
                         lr=current_lr,
                         accelerator=accelerator # Pass accelerator instance
                     )
-
                     # Prepare log dict for WandB
                     log_dict.update({
                         "train/recon_loss": g_recon,
+                        "train/recon_loss_log10": g_recon_log10,
                         "train/comit_loss": g_comit,
+                        "train/comit_loss_log10": g_comit_log10,
                         "train/ortho_loss": g_ortho,
                         "train/diver_loss": g_diver,
                         "train/total_loss": g_total,
+                        "comit/dynamic_commit_weight": dynamic_commitment_weight,
+                        "comit/expected_commit_weight": expected_commitment_weight,
+                        "train/recon_per_comit": g_recon_per_comit,
                         "evaluate/total_tokens": wandb_total_tokens, # Placeholder
+                        "evaluate/recon_loss": wandb_eval_recon_loss, # Placeholder
+                        "evaluate/comit_loss": wandb_eval_comit_loss, # Placeholder
                         "codebook/usage": wandb_codebook_usage, # Placeholder
+                        "codebook/used_codes": wandb_codebook_used, # Placeholder
                         "codebook/entropy": wandb_codebook_entropy, # Placeholder
                         "codebook/max_entropy": wandb_codebook_max_entropy, # Placeholder
                         "topcode/top1_ratio": wandb_codebook_top1_ratio, # Placeholder
@@ -799,6 +1051,7 @@ def vqe_train(
                         "topcode/top9_ratio": wandb_codebook_top9_ratio, # Placeholder
                         "topcode/topx_ratio": wandb_codebook_top10_ratio, # Placeholder
                         "learning_rate": current_lr,
+                        "lr_log10": lr_log10,
                         "epoch": epoch + 1,
                         "global_step": global_step, # Useful for plotting against global steps
                     })
@@ -807,25 +1060,35 @@ def vqe_train(
                 # Run evaluation based on spoch
                 if global_step % evaluate_every_spoch == 0:
                     accelerator.wait_for_everyone() # Sync all processes before eval
-                    if accelerator.is_main_process :
-                        try:
-                            result = evaluate_codebook_metrics_v2()
-                            if accelerator.is_main_process:
-                                (wandb_codebook_usage, 
-                                   wandb_total_tokens, 
-                                   wandb_codebook_top1_ratio, 
-                                   wandb_codebook_top3_ratio,
-                                   wandb_codebook_top5_ratio, 
-                                   wandb_codebook_top7_ratio, 
-                                   wandb_codebook_top9_ratio,
-                                   wandb_codebook_top10_ratio, 
-                                   wandb_codebook_entropy, 
-                                   wandb_codebook_max_entropy) = result
-                                print(f"Effective Step {global_step} - Codebook Usage: {wandb_codebook_usage:.2%}")
-                        except Exception as e:
+                    try:
+                        result = evaluate_codebook_metrics_v3()
+                        if accelerator.is_main_process and result is not None:
+                            (
+                               wandb_codebook_used,
+                               wandb_codebook_usage, 
+                               wandb_total_tokens, 
+                               wandb_codebook_top1_ratio, 
+                               wandb_codebook_top3_ratio,
+                               wandb_codebook_top5_ratio, 
+                               wandb_codebook_top7_ratio, 
+                               wandb_codebook_top9_ratio,
+                               wandb_codebook_top10_ratio, 
+                               wandb_codebook_entropy, 
+                               wandb_codebook_max_entropy,
+                               wandb_eval_recon_loss,
+                               wandb_eval_comit_loss
+                               ) = result
+                            print(f"Effective Step {global_step} - Codebook Usage: {wandb_codebook_usage:.2%}")
+                    except Exception as e:
                             print(f"Error during evaluation: {e}")
-                    else:
-                        wandb_codebook_usage = 0.0 # Default value if eval doesn't run
+
+                    try:
+                        runtime_json = read_runtime_json() 
+                        if runtime_json is not None:
+                            target_commitment_weight = runtime_json["target_commitment_weight"] 
+                    except Exception as e:
+                        print(f"Error during read runtime_json: {e}")
+
                     accelerator.wait_for_everyone() # Sync all processes after eval
 
                 # Periodic checkpointing (main process only)
@@ -840,6 +1103,8 @@ def vqe_train(
                         spoch=spoch,
                         global_step=global_step,
                         cnn_type=cnn_type,
+                        model_type=model_type,
+                        dynamic_commitment_weight=dynamic_commitment_weight,
                         accelerator=accelerator # Pass accelerator instance
                     )
                 # --- End of if accelerator.sync_gradients block ---
@@ -850,8 +1115,9 @@ def vqe_train(
 
     # Final save (main process only)
     if accelerator.is_main_process:
+        ckpt_path = f"{output_model_path}.final.pth"
         save_full_checkpoint(
-            path=output_model_path,
+            path=ckpt_path,
             model=model,
             optimizer=optimizer,
             scheduler=scheduler,
@@ -882,6 +1148,7 @@ def main():
     # Added new Accelerate-specific arguments
     vqe_train(
         train_npy_dir=config.get("train_npy_dir"),
+        model_type=config.get("model_type",1),
         evaluation_npy_dir=config.get("evaluation_npy_dir"),
         output_model_path=config.get("output_model_path", "nanopore_vq_tokenizer.pth"),
         lr=config.get("lr", 3e-4),
@@ -892,6 +1159,7 @@ def main():
         val_ratio=config.get("val_ratio", 0.1),
         do_evaluate=config.get("do_evaluate", False),
         commitment_weight=config.get("commitment_weight", 0.25),
+        commitment_weight_lr=config.get("commitment_weight_lr", 0.01),
         codebook_diversity_loss_weight=config.get("codebook_diversity_loss_weight", 0.0),
         orthogonal_reg_weight=config.get("orthogonal_reg_weight", 0.0),
         loss_csv_path=config.get("loss_csv_path", "train_loss.csv"),
@@ -913,6 +1181,9 @@ def main():
         update_loss_weight_every=config.get("update_loss_weight_every", 10),
         prefetch_factor=config.get("prefetch_factor", 128),
         use_wandb=config.get("use_wandb", True),
+        use_dynamic_commitment_weight=config.get("use_dynamic_commitment_weight", True),
+        commitment_weight_freeze_steps=config.get("commitment_weight_freeze_steps", 20000),
+        commitment_weight_rpc=config.get("commitment_weight_rpc", 1),
         wandb_project=config.get("wandb_project", "nanopore_vq"),
         wandb_name=config.get("wandb_name", "default_run"),
         lr_scheduler_type=config.get("lr_scheduler_type", "cosine"),

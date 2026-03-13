@@ -92,3 +92,11 @@ demo.*
 
 # Weights & Biases logs (alternative syntax)
 **/wandb/**
+# 忽略 workflows 目录下所有内容
+/workflows/*
+
+# 但不忽略 workflows 目录下所有的 .py 文件 (递归)
+!/workflows/**/*.py
+
+# 也不忽略 workflows 目录下所有的 .sh 文件 (递归)
+!/workflows/**/*.sh

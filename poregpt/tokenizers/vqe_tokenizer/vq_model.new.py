@@ -6,6 +6,11 @@ from typing import Tuple, Dict
 # 导入新的 CNN 模型
 from .cnn_model import NanoporeCNNModel
 
+
+# 导入局部注意力模块
+from .local_attention import LocalTransformerEncoderLayer
+
+
 class NanoporeVQModel(nn.Module):
     """
     Nanopore VQ Tokenizer for Direct RNA Sequencing (130 bps, 4 kHz)
@@ -35,7 +40,6 @@ class NanoporeVQModel(nn.Module):
         freeze_cnn: bool = False,
         cnn_checkpoint_path: str = None,
         # Transformer 参数
-        d_model: int = 256,          # 投影后的维度 (z_e 维度)
         nhead: int = 8,              # Transformer 头数
         num_layers: int = 8,         # Transformer 层数
         dim_feedforward: int = 1024, # FFN 维度
@@ -56,7 +60,10 @@ class NanoporeVQModel(nn.Module):
         """
         super().__init__()
 
-        self.cnn_model = NanoporeCNNModel(cnn_type=1)
+        self.cnn_model = NanoporeCNNModel(cnn_type=cnn_type)
+        
+        d_model = self.cnn_model.out_channels  # 自动设置为CNN输出维度
+        
         codebook_dim = d_model
 
         # 设置 codebook_dim 根据 cnn_type
@@ -80,18 +87,31 @@ class NanoporeVQModel(nn.Module):
         # -----------------------------
         self.d_model = d_model # 256
         
+        dim_feedforward = d_model
         # 线性投影层: 将 CNN 特征 (128) 映射到 Transformer 维度 (256)
-        self.proj_in = nn.Linear(self.cnn_model.out_channels, d_model)
         
         # 构建 Transformer Encoder
-        encoder_layers = nn.TransformerEncoderLayer(
-            d_model=d_model, 
-            nhead=nhead, 
-            dim_feedforward=dim_feedforward, 
-            dropout=dropout,
-            batch_first=True # 非常重要：保持 (Batch, Seq, Feature) 格式
+        # encoder_layer = nn.TransformerEncoderLayer(
+        #     d_model=d_model, 
+        #     nhead=nhead, 
+        #     dim_feedforward=dim_feedforward, 
+        #     dropout=dropout,
+        #     batch_first=True # 非常重要：保持 (Batch, Seq, Feature) 格式
+        # )
+        # self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        # 使用局部注意力的Transformer
+        encoder_layer = LocalTransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            window_size=65,  # 局部窗口大小
+            dim_feedforward=dim_feedforward,
+            dropout=dropout
         )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+
+
 
         self.vq = VectorQuantize(
             dim=d_model,
@@ -302,7 +322,7 @@ class NanoporeVQModel(nn.Module):
     def _print_vq_config(self) -> None:
         """打印 VQ 配置信息（仅 rank 0）"""
         print("Intialized VectorQuantize with the following hyperparameters:")
-        print(f"  dim: {d_model}")
+        print(f"  dim: {self.d_model}")
         print(f"  codebook_size: {self.codebook_size}")
         print(f"  kmeans_init: True")
         print(f"  kmeans_iters: 10")
@@ -356,18 +376,18 @@ class NanoporeVQModel(nn.Module):
         # 2.2 线性投影 (Projection)
         # 将 CNN 提取的 128 维特征，映射到 Transformer 的 256 维空间
         # 这对应架构中的 "Linear Projection: 128 -> 256"
-        z_projected = self.proj_in(z_permuted)
+        # z_projected = self.proj_in(z_permuted)
         # z_projected: [B, N, D_Model]
         #   (D_Model: Transformer 模型维度 = 256)
         #   例如:
         # 这个张量就是你描述中的 h_proj / z_e (Encoder Output)
-
+        
         # ======================================================================
         # 3. Transformer 上下文建模 (Context Modeling)
         #    目标：利用全局注意力机制增强特征表达能力
         # ======================================================================
         # 输入 z_projected: [B, N, 256]
-        z_transformed = self.transformer_encoder(z_projected)
+        z_transformed = self.transformer_encoder(z_permuted)
         # 输出 z_transformed: [B, N, 256]
         # 特征维度保持 256 不变，但每个位置的特征都融合了全局上下文信息
         # 这个张量就是最终送入 VQ 的 z_e

@@ -143,6 +143,7 @@ for i in "${!INPUT_DIRS[@]}"; do
         --strategy "$STRATEGY" \
         --chunk_size "$CHUNK_SIZE" \
         --overlap_size "$OVERLAP_SIZE" \
+        --clip_value $CLIP \
         --dtype "$DTYPE" \
         --num_workers "$PROCESSES"
 

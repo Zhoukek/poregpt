@@ -213,6 +213,7 @@ class NanoporeVQEModel_V1(nn.Module):
         else:
             ema_update = True
 
+        # 原理：threshold_ema_dead_code 代码中的 expire_codes_ 函数会检测活跃度低于阈值的码，并强制用当前 Batch 中的随机向量替换它。这能像“强心针”一样不断激活坍缩的码。
         self.vq = VectorQuantize(
             dim=self.latent_dim,
             codebook_size=codebook_size,

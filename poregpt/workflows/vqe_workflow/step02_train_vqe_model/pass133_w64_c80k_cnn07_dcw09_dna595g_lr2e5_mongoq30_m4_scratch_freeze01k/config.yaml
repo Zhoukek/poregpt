@@ -135,4 +135,4 @@ use_wandb: true
 # WandB 项目名称
 wandb_project: "train_vqe_dna04g"
 # 当前运行的实验名称
-wandb_name: "pass132_dna595g_scratch_c080k_cnn07_lr2e5_dbsz48_gbsz2048_lc2400-mongoq30-dcw09-m4-freeze01k"
+wandb_name: "pass133_dna595g_scratch_c080k_cnn07_lr2e5_dbsz48_gbsz2048_lc2400-mongoq30-dcw09-m4-freeze01k"

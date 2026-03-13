@@ -138,6 +138,7 @@ def main():
 
 
     args = parser.parse_args()
+    print(args.clip_value)
 
     clip_value = args.clip_value/10
 

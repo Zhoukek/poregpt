@@ -527,4 +527,114 @@ class VQETokenizer:
         print(f"✅ Wrote {len(results)} reads to {output_path}")
 
 
+    def _get_codebook_embed(self) -> torch.Tensor:
+        """
+        获取 codebook embedding，统一成形状 [K, D]
+        K = codebook_size, D = latent_dim
+        """
+        embed = self.model.vq._codebook.embed
 
+        # 可能是 [1, K, D]，也可能是 [K, D]
+        if embed.ndim == 3:
+            embed = embed[0]
+        elif embed.ndim != 2:
+            raise RuntimeError(f"Unexpected codebook embed shape: {embed.shape}")
+
+        return embed
+
+    def decode_token_ids(
+        self,
+        token_ids,
+        target_signal_len: int | None = None,
+        return_numpy: bool = True,
+    ):
+        """
+        将 token ids 重建为近似信号。
+
+        Args:
+            token_ids:
+                - list[int]                -> 单条 token 序列
+                - np.ndarray [T]           -> 单条 token 序列
+                - np.ndarray [B, T]        -> batch token 序列
+                - torch.Tensor [T] / [B,T]
+            target_signal_len:
+                - 如果提供，则输出裁剪/补零到这个长度
+                - 如果不提供，则默认输出长度约为 T * downsample_rate
+            return_numpy:
+                - True: 返回 numpy
+                - False: 返回 torch.Tensor
+
+        Returns:
+            shape:
+                - 单条输入: [L]
+                - batch输入: [B, L]
+        """
+        # 1) 规范化输入 shape -> [B, T]
+        if isinstance(token_ids, list):
+            token_ids = np.asarray(token_ids, dtype=np.int64)
+        elif isinstance(token_ids, np.ndarray):
+            token_ids = token_ids.astype(np.int64)
+        elif isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.detach().cpu().long().numpy()
+        else:
+            raise TypeError(f"Unsupported token_ids type: {type(token_ids)}")
+
+        single_input = False
+        if token_ids.ndim == 1:
+            token_ids = token_ids[None, :]
+            single_input = True
+        elif token_ids.ndim != 2:
+            raise ValueError(f"token_ids must be 1D or 2D, got shape {token_ids.shape}")
+
+        # 2) 转 tensor
+        token_ids_t = torch.from_numpy(token_ids).long().to(self.device)   # [B, T]
+
+        # 3) 边界检查
+        if token_ids_t.numel() == 0:
+            raise ValueError("Empty token_ids.")
+        if token_ids_t.min() < 0 or token_ids_t.max() >= self.codebook_size:
+            raise ValueError(
+                f"token id out of range. valid=[0, {self.codebook_size - 1}], "
+                f"got min={int(token_ids_t.min())}, max={int(token_ids_t.max())}"
+            )
+
+        # 4) codebook lookup: [B, T] -> [B, T, D]
+        codebook = self._get_codebook_embed().to(self.device)  # [K, D]
+        z_q = codebook[token_ids_t]                            # [B, T, D]
+
+        # 5) decoder 需要 [B, C, T]
+        z_q = z_q.permute(0, 2, 1).contiguous()               # [B, D, T]
+
+        # 6) decode
+        with torch.no_grad():
+            recon = self.model.decoder(z_q)                   # [B, 1, L]
+
+        recon = recon.squeeze(1)                              # [B, L]
+
+        # 7) 长度对齐
+        if target_signal_len is None:
+            # 默认按 stride 反推近似长度
+            target_signal_len = token_ids.shape[1] * self.downsample_rate
+
+        current_len = recon.shape[-1]
+        if current_len > target_signal_len:
+            recon = recon[..., :target_signal_len]
+        elif current_len < target_signal_len:
+            recon = F.pad(recon, (0, target_signal_len - current_len))
+
+        if return_numpy:
+            recon = recon.detach().cpu().numpy()
+            if single_input:
+                return recon[0]
+            return recon
+
+        if single_input:
+            return recon[0]
+        return recon
+
+    def parse_token_string(self, text: str) -> np.ndarray:
+        """
+        把 <|bwav:12|><|bwav:31|>... 解析成 int 数组
+        """
+        ids = re.findall(r"<\|bwav:(\d+)\|>", text)
+        return np.asarray([int(x) for x in ids], dtype=np.int64)

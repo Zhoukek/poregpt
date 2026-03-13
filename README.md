@@ -45,7 +45,7 @@ Nanopore 信号语言建模（Signal LM）；
 ### 从源码安装（推荐）
 
 ```bash
-git clone https://github.com/lovearthai/nanopore_signal_tokenizer.git
+git clone https://github.com/lovearthai/poregpt.git
 cd nanopore_signal_tokenizer
 pip install -e . 
 #如果阿里源报错，切换清华源或官方源 
@@ -61,32 +61,78 @@ pip install vector-quantize-pytorch -i https://pypi.org/simple/
 conda install -c pytorch faiss-gpu  
 ```
 
-##  VQ_tokenizer
+##  VQE_tokenizer
+
+### 检查检查点格式
+
+一个合格的检查点格式如下
+```
+.
+├── metadata.json
+├── model.safetensors
+├── optimizer.bin
+├── random_states_0.pkl
+└── scheduler.bin
+```
+其中metadata.json内容举例如下：
+```
+{"epoch": 0, "spoch": 0, "global_step": 10000, "cnn_type": 7, "model_type": 3}
+```
 
 ### 初始化 Tokenizer
 
 ```python
-from nanopore_signal_tokenizer import VQTokenizer
+import numpy as np
+from poregpt.tokenizers.vqe_tokenizer import VQETokenizer
 
-tokenizer = VQTokenizer(
-    model_ckpt="models/model_vq_8k_epoch10.pth",  # 必填：预训练模型路径
-    device="cuda",                                # 可选：设备，默认自动选 cuda/cpu
-    token_batch_size=100                          # 可选：批处理 token 的内部 batch size, 也就是每次同时转换多少个token
+
+tokenizer = VQETokenizer(
+    model_ckpt="models/example_vqe_tokenizer.pth",
+    token_batch_size=100
 )
+
 ```
 
+"""
+##  配置参数说明
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `model_ckpt` | 预训练模型路径目录 | 必填 |
+| `device` | 推理设备 | `"cuda"`,如果不填 |
+"""
+
+
+## 加载VQE检查点会有如下输出
 ```bash
 ✅ Using device: cuda
-📂 Loading checkpoint: models/model_vq_8k_epoch10.pth
-🎯 Inferred: codebook_size=8192, dim=64
+📂 Loading checkpoint: models/example_vqe_tokenizer.pth
+🎯 Inferred: codebook_size=65536, dim=512, cnn_type=7
+codebook_dim:512
+Intialized VectorQuantize with the following hyperparameters:
+  dim: 512
+  codebook_size: 65536
+  kmeans_init: True
+  kmeans_iters: 10
+  decay: 0.99
+  threshold_ema_dead_code: 2
+  commitment_weight: 1.0
+  codebook_diversity_loss_weight: 1.0
+  orthogonal_reg_weight: 1.0
+  orthogonal_reg_max_codes: 256
+  orthogonal_reg_active_codes_only: True
+  cnn_type: 7
+------------------------------------------------------------
+
 ✅ VQTokenizer initialized:
-   Checkpoint       : ...
+   Checkpoint       : /mnt/nas_syy/default/poregpt/poregpt/poregpt/test/test_vqe_tokenizer/models/example_vqe_tokenizer.pth
    Device           : cuda
-   Codebook size    : 8192
-   Latent dim       : 64
+   Model type       : 3
+   Codebook size    : 65536
+   Latent dim       : 512
    Downsample rate  : 5
    Chunk size       : 500
-   Margin           : 25 samples
+   Margin           : 10 samples
+------------------------------------------------------------
 ```
 注意：downsample_rate、chunk_size、margin 等参数由模型 checkpoint 自动推断，不可手动覆盖
 
@@ -105,32 +151,18 @@ print(len(tokens_list))        # 输出 token 数量
 print("".join(tokens_list[:10]))  # 拼接前10个 token
 ```
 
-### 对一段信号进行token化-关闭归一化
-
-
+### 对一段信号进行token化-确保在调用tokenize_data函数之前，你已经对signal作了标准化
 ```
-import numpy as np
-
-# 模拟一段信号（单位：pA，长度任意 ≥ 25）
+# 模拟一段 1200 点的信号（~240ms @ 5kHz）
 signal = np.random.randn(1000).astype(np.float32) * 5 + 100
-
-# 默认返回 L1 层级的 token 列表（每个元素是字符串，如 "<|bwav:1234|>"）
-tokens_list = tokenizer.tokenize_data(signal, do_normalize=False)
-print(len(tokens_list))        # 输出 token 数量
-print("".join(tokens_list[:10]))  # 拼接前10个 token
-```
-
-### 对一段信号进行token化-启用中值滤波(窗口为5) 和低通零相位滤波（截至频率为1000HZ）
+# 获取全部层级 token (L1–L4)
+tokens_list = tokenizer.tokenize_data(signal)
+print(len(tokens_list))
+tokens_str = "".join(tokens_list[:20])
+print(tokens_str)
+# <|bwav:L1_1309|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|><|bwav:L1_4762|>
 
 ```
-# 同时启用中值滤波（medf）和低通滤波（lpf）
-tokens_list = tokenizer.tokenize_data(signal, medf=5, lpf=1000)
-
-print(len(tokens_list))  # 总 token 数 = 4 × (有效信号块数)
-print("".join(tokens_list[:20]))
-```
-
-### 如果传入信号少于25个，返回空的list
 
 
 ### 对一个fast5文件进行token化
@@ -139,10 +171,13 @@ print("".join(tokens_list[:20]))
 支持 single-read 和 multi-read FAST5
 
 ```
+#输出为 gzip 压缩的 JSONL 格式：
 tokenizer.tokenize_fast5(
-    fast5_path="data/sample.fast5",
-    output_path="output/sample.jsonl.gz"
+    fast5_path="fast5/demo.fast5",
+    output_path="fast5/demo.jsonl.gz",
+    nanopore_signal_process_strategy="stone"
 )
+
 ```
 
 输出的jsonl.gz内容格式

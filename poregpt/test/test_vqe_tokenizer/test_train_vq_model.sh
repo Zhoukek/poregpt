@@ -1,0 +1,11 @@
+nohup torchrun --nproc_per_node=4 test_train_vq_model.py \
+    --npy_dir fast5_chunks_w12k \
+    --output_model_path model_vq_8k_epoch10.pth \
+    --batch_size 32 \
+    --lr 1e-4 \
+    --num_epochs 20 \
+    --codebook_size 8192 \
+    --chunk_size 12000 \
+    --num_workers 8 \
+    --do_evaluate \
+    --val_size 10 &> test_train_vq_model.out &

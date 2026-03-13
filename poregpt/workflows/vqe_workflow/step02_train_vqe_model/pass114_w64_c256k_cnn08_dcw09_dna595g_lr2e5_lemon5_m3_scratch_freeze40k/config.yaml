@@ -1,0 +1,136 @@
+# VQ-VAE 模型训练配置文件
+# 用于 nanopore 测序信号 tokenization 的模型训练
+# 该配置文件对应于 vqe_train.py 脚本的所有可配置参数
+
+# === 数据路径 ===
+# 训练数据集目录 (包含 .npy 文件)
+# === 数据路径 ===
+# 训练数据集目录 (包含 .npy 文件)
+train_npy_dir: "/mnt/si003067jezr/default/poregpt/dataset/human_dna_595g/memap_lemon5/train"
+# 验证数据集目录 (可选，如果 do_evaluate 为 True 则需要)
+evaluation_npy_dir: "/mnt/si003067jezr/default/poregpt/dataset/human_dna_595g/memap_lemon5/validation"
+
+
+# === 输出与检查点 ===
+# 训练完成后保存的模型文件路径
+output_model_path: "models/porepgt_vqe_tokenizer"
+# 训练损失记录到 CSV 文件的路径
+loss_csv_path: "train_loss.csv"
+# 从指定路径加载检查点以恢复训练 (可选，留空或设为 null 以从头开始)
+# 示例: "models_old/nanopore_signal_tokenizer.pth.spoch26000.pth"
+#checkpoint_path: "/mnt/si003067jezr/default/poregpt/poregpt/poregpt/workflows/vqe_workflow/step02_train_vqe_model/pass109_w64_c256k_cnn08_dcw0q_dna595g_lr2e5_lemon5_m2_initcnn_freeze40k/models/porepgt_vqe_tokenizer.step15000.pth"
+# 训练多少个 spoch 后保存一次模型检查点
+# Spoch 是指每 update_loss_weight_every 次迭代后的一个周期单位
+save_checkpoint_every_spoch: 500
+# 每隔多少个训练步骤（micro-step）打印一次训练日志
+# 注意：实际的日志记录频率可能受 accelerator.accumulate 影响
+loss_log_interval: 10
+# 每隔多少个 spoch 运行一次评估 (如果 do_evaluate 为 True)
+evaluate_every_spoch: 100
+
+# === 训练超参数 ===
+# 总共训练的 epoch 数
+num_epochs: 10
+
+
+model_type: 3
+  
+# 学习率
+lr: 2.0e-05
+# 全局批次大小 (Global Batch Size)，用于模拟更大的有效批次大小
+# 实际批次大小由 global_batch_size 和 device_micro_batch_size 以及 GPU 数量共同决定
+#global_batch_size: 32768
+
+# 2064=48x43: 当device_micro_batch_size是48时,把global_batch_size设置为2064
+# 2072=56*37
+global_batch_size: 2048
+global_batch_size: 1920
+global_batch_size: 2048
+# 每个设备上的微批次大小f (Micro Batch Size)，影响单次前向/反向传播的内存使用
+device_micro_batch_size: 64
+device_micro_batch_size: 48
+device_micro_batch_size: 8
+
+# device_micro_batch_size==128 在w64的64G显存能占logic_chunk_size是1200
+dataset_logic_chunk_size: 2400  
+# 使用的混合精度类型 ("no", "fp16", "bf16", "fp8")
+# bf16 通常在支持的硬件上提供最佳性能和精度平衡
+mixed_precision: "no"
+# 梯度裁剪阈值，防止梯度爆炸 (设置为 None 或负数以禁用)
+gradient_clipping: 1.0
+# 是否强制使用 CPU 进行训练 (仅用于调试)
+cpu: false
+
+# === 模型架构与量化 ===
+# VQ-VAE 中的码本 (Codebook) 大小，决定了 token 的数量
+codebook_size: 262144
+#codebook_size: 49152
+# VQ 码本嵌入维度 (此参数由模型内部决定，通常不在配置文件中显式设置)
+# codebook_dim: 64 # 此行是代码内部变量，已从配置中移除
+# 输入信号序列的长度 (每个样本的信号点数)
+chunk_size: 12000
+# 编码器 CNN 的类型 (0, 1, 2 对应不同的网络结构)
+cnn_type: 8
+# 是否使码本嵌入向量可学习 (true: 可学习, false: 固定或仅通过 EMA 更新)
+learnable_codebook: false
+# 初始化码本的路径 (可选，用于预初始化码本，例如从 K-means 聚类结果)
+init_codebook_path: "/mnt/nas_syy/default/poregpt/shared/kmc_models_lemon_c64k_redo1/memap_train_clustered_10p_centroids_k65536.npy"
+init_codebook_path: ""
+# CNN 编码器的预训练模型路径 (可选，用于初始化编码器权重)
+cnn_checkpoint_path: "/mnt/nas_syy/default/poregpt/shared/cnn_models_lemon_type1/checkpoints/nanopore_signal_tokenizer.pth.epoch28.pth"
+cnn_checkpoint_path: "/mnt/si003067jezr/default/poregpt/poregpt/poregpt/workflows/vqe_workflow/step01_train_cnn_model/human_dna_595g_memap_lemon5/train_cnn8_lr1e5/models/nanopore_cnn8.epoch38.pth"
+cnn_checkpoint_path: ""
+# 是否冻结 CNN 编码器权重 (0: 不冻结, 1: 冻结)
+freeze_cnn: 0
+
+# === 损失函数权重 ===
+# VQ-VAE 中承诺损失 (Commitment Loss) 的权重
+# 控制输入信号与重构信号的一致性以及编码器与码本匹配的重要性
+use_dynamic_commitment_weight: true
+commitment_weight: 9.0
+commitment_weight_freeze_steps: 20000
+
+# 码本多样性损失 (Codebook Diversity Loss) 的权重
+# 鼓励更多码本向量被使用，防止死神经元
+codebook_diversity_loss_weight: 0.0
+# 正交正则化损失 (Orthogonal Regularization Loss) 的权重
+# 鼓励码本向量彼此正交，增加表达能力
+orthogonal_reg_weight: 0.0
+
+# === 数据加载 ===
+# 加载数据时使用的子进程数量
+num_workers: 64
+# 验证集比例 (从训练集中划分，如果 evaluation_npy_dir 未设置)
+val_ratio: 0.02
+# DataLoader 的 prefetch_factor 参数，控制预取数据的批次数量
+prefetch_factor: 8192
+
+# === 评估 ===
+# 是否在训练过程中进行验证评估
+do_evaluate: true
+
+# === 学习率调度 ===
+# 学习率调度器类型 ("constant", "cosine", "linear")
+lr_scheduler_type: "cosine"
+# 学习率预热步数
+# accelerate学习率会根据训练进程的数量进行调整。这是因为前面提到的观察批次大小。因此，对于双GPU的情况，学习率的调整频率是单GPU的两倍，以适应两倍的批次大小（假设单GPU实例上的批次大小没有变化）。
+# 所以我们都是这位卡数的倍数
+warmup_steps: 1000
+# 预热开始的学习率因子 (相对于初始 lr)
+warmup_start_factor: 0.001
+# 预热结束的学习率因子 (相对于初始 lr，通常为 1.0)
+warmup_end_factor: 1.0
+# 主调度器结束时的学习率因子 (相对于预热结束时的 lr)
+main_scheduler_end_factor: 0.4
+
+# === 动态权重调整 (DWA) 相关 (仅用于日志记录，不影响实际训练损失) ===
+# 每隔多少个训练步骤更新一次动态权重平均器 (DWA) 的状态并记录日志
+update_loss_weight_every: 10
+
+# === WandB 实验跟踪 (Weights & Biases) ===
+# 是否启用 WandB 日志记录
+use_wandb: true
+# WandB 项目名称
+wandb_project: "train_vqe_dna04g"
+# 当前运行的实验名称
+wandb_name: "pass114_dna595g_scratch_c256k_cnn08_lr2e5_dbsz08_gbsz2048_lc2400-lemon5-dcw09-m3-freeze40k"

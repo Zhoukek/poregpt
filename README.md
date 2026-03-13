@@ -45,7 +45,7 @@ Nanopore 信号语言建模（Signal LM）；
 ### 从源码安装（推荐）
 
 ```bash
-git clone [https://github.com/lovearthai/nanopore_signal_tokenizer.git](https://github.com/lovearthai/poregpt.git](https://github.com/lovearthai/poregpt.git)
+git clone https://github.com/lovearthai/poregpt.git
 cd nanopore_signal_tokenizer
 pip install -e . 
 #如果阿里源报错，切换清华源或官方源 

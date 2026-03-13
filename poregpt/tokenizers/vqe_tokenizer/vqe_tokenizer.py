@@ -30,7 +30,7 @@ from accelerate import Accelerator
 from .vqe_model_v1 import NanoporeVQEModel_V1
 from .vqe_model_v2 import NanoporeVQEModel_V2
 from .vqe_model_v3 import NanoporeVQEModel_V3
-
+import torch.nn.functional as F
 
 
 def load_accelerate_checkpoint(model_ckpt_dir: str):

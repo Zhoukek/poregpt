@@ -79,7 +79,16 @@ def load_accelerate_checkpoint(model_ckpt_dir: str):
         except:
             cnn_type = 0
 
-    return {'model_state_dict': state_dict, 'cnn_type': cnn_type}
+    model_type = 0
+    if metadata_path and os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, 'r') as meta_f:
+                metadata = json.load(meta_f)
+                model_type = metadata.get('model_type', 0)
+        except:
+            model_type = 0
+
+    return {'model_state_dict': state_dict, 'cnn_type': cnn_type,'model_type':model_type}
 class VQETokenizer:
     """
     Nanopore Single-Layer VQ Tokenizer.
@@ -92,8 +101,7 @@ class VQETokenizer:
         self,
         model_ckpt: str = "nanopore_vq_tokenizer.pth",
         device: str = "cuda",
-        token_batch_size: int = 8000,
-        model_type: int = 1
+        token_batch_size: int = 8000
     ):
         # --- Device setup ---
         if device is None:
@@ -122,6 +130,13 @@ class VQETokenizer:
             cnn_type = 0
         else:
             cnn_type = ckpt_data['cnn_type']
+        # ✅ 1. 从 checkpoint 中读取 cnn_type（关键！）
+        if 'model_type' not in ckpt_data:
+            print("Checkpoint does not contain 'cnn_type'. forced to 0")
+            model_type = 0
+        else:
+            model_type = ckpt_data['model_type']
+
 
 
         # ✅ 正确：从 model_state_dict 中找 codebook
@@ -179,6 +194,7 @@ class VQETokenizer:
         print("\n✅ VQTokenizer initialized:")
         print(f"   Checkpoint       : {os.path.abspath(model_ckpt)}")
         print(f"   Device           : {self.device}")
+        print(f"   Model type       : {model_type}")
         print(f"   Codebook size    : {self.codebook_size}")
         print(f"   Latent dim       : {self.dim}")
         print(f"   Downsample rate  : {self.downsample_rate}")

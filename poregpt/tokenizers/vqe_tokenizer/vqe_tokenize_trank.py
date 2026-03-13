@@ -168,7 +168,7 @@ def main():
     print("-" * 60)
 
     # Initialize the tokenizer once
-    tokenizer = VQETokenizer(model_ckpt=model_ckpt, device=device,model_type=model_type)
+    tokenizer = VQETokenizer(model_ckpt=model_ckpt, device=device)
 
     # Process the single file
     # Note: process_npy_file likely needs to be adapted or replaced

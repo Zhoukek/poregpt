@@ -8,7 +8,8 @@ from .cnn_model import NanoporeCNNModel
 
 
 # 导入局部注意力模块
-from .local_attention import LocalTransformerEncoderLayer
+from .local_attention import LocalTransformerEncoder
+
 
 
 class NanoporeVQEModel_V2(nn.Module):
@@ -31,6 +32,8 @@ class NanoporeVQEModel_V2(nn.Module):
     def __init__(
         self,
         codebook_size: int = 8192,
+        codebook_decay: float = 0.99,
+        codebook_emadc: int = 2,
         commitment_weight: float = 1.0,
         orthogonal_reg_weight: float = 1.0,
         codebook_diversity_loss_weight: float = 1.0,
@@ -104,25 +107,43 @@ class NanoporeVQEModel_V2(nn.Module):
         # self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
         # 使用局部注意力的Transformer
-        encoder_layer = LocalTransformerEncoderLayer(
+        # 线性投影层: 将 CNN 特征 (128) 映射到 Transformer 维度 (256)
+        # --- 新增：位置编码 ---
+        self.max_position = 2048  # 预设一个足够大的上限
+        self.pos_embedding = nn.Parameter(torch.zeros(1, self.max_position, d_model))
+        # 初始化（小的标准差有助于稳定训练开始阶段）
+        nn.init.trunc_normal_(self.pos_embedding, std=0.02)        
+        # 构建 Transformer Encoder
+        #encoder_layer = nn.TransformerEncoderLayer(
+        #    d_model=d_model, 
+        #    nhead=nhead, 
+        #    dim_feedforward=dim_feedforward, 
+        #    dropout=dropout,
+        #    activation='gelu', # GELU 通常比 ReLU 在信号处理上效果稍好
+        #    batch_first=True # 非常重要：保持 (Batch, Seq, Feature) 格式
+        #)
+        #self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        # 使用局部注意力的Transformer
+        # 2. 直接实例化我们自定义的 Encoder，而不是传给 nn.TransformerEncoder
+        self.transformer_encoder = LocalTransformerEncoder(
             d_model=d_model,
             nhead=nhead,
-            window_size=65,  # 局部窗口大小
+            num_layers=num_layers,
+            window_size=65,        # 1200 token 下，65 是非常合理的窗口
             dim_feedforward=dim_feedforward,
             dropout=dropout
         )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
 
 
 
         self.vq = VectorQuantize(
             dim=d_model,
             codebook_size=codebook_size,
+            decay=codebook_decay,
+            threshold_ema_dead_code=codebook_emadc,
             kmeans_init=True,
             kmeans_iters=10,
-            decay=0.99,
-            threshold_ema_dead_code=2,
             commitment_weight=commitment_weight,
             codebook_diversity_loss_weight=codebook_diversity_loss_weight,
             orthogonal_reg_weight=orthogonal_reg_weight,
@@ -407,13 +428,21 @@ class NanoporeVQEModel_V2(nn.Module):
         #   (D_Model: Transformer 模型维度 = 256)
         #   例如:
         # 这个张量就是你描述中的 h_proj / z_e (Encoder Output)
-        
         # ======================================================================
         # 3. Transformer 上下文建模 (Context Modeling)
         #    目标：利用全局注意力机制增强特征表达能力
         # ======================================================================
         # 输入 z_projected: [B, N, 256]
-        z_transformed = self.transformer_encoder(z_permuted)
+        
+        # --- 新增：注入位置编码 ---
+        seq_len = z_permuted.size(1)
+        if seq_len > self.max_position:
+            raise ValueError(f"输入序列长度 {seq_len} 超过了预设的最大位置编码长度 {self.max_position}")
+        # 将位置编码加到特征上（利用广播机制 [1, 2048, 256] -> [B, 512, 256]）
+        z_with_pos = z_permuted + self.pos_embedding[:, :seq_len, :]
+        # -------------------------
+        # 修改输入，使用带位置信息的 z_with_pos
+        z_transformed = self.transformer_encoder(z_with_pos)
         # 输出 z_transformed: [B, N, 256]
         # 特征维度保持 256 不变，但每个位置的特征都融合了全局上下文信息
         # 这个张量就是最终送入 VQ 的 z_e

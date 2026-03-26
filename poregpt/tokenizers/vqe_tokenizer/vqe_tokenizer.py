@@ -30,6 +30,13 @@ from accelerate import Accelerator
 from .vqe_model_v1 import NanoporeVQEModel_V1
 from .vqe_model_v2 import NanoporeVQEModel_V2
 from .vqe_model_v3 import NanoporeVQEModel_V3
+from .vqe_model_v4 import NanoporeVQEModel_V4
+from .vqe_model_v5 import NanoporeVQEModel_V5
+from .vqe_model_v6 import NanoporeVQEModel_V6
+from .vqe_model_v7 import NanoporeVQEModel_V7
+from .vqe_model_v8 import NanoporeVQEModel_V8
+from .vqe_model_v9 import NanoporeVQEModel_V9
+from .vqe_model_v10 import NanoporeVQEModel_V10
 import torch.nn.functional as F
 
 
@@ -88,7 +95,16 @@ def load_accelerate_checkpoint(model_ckpt_dir: str):
         except:
             model_type = 0
 
-    return {'model_state_dict': state_dict, 'cnn_type': cnn_type,'model_type':model_type}
+    codebook_size = 0
+    if metadata_path and os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, 'r') as meta_f:
+                metadata = json.load(meta_f)
+                codebook_size = metadata.get('codebook_size', 0)
+        except:
+            codebook_size = 0
+
+    return {'model_state_dict': state_dict, 'cnn_type': cnn_type,'model_type':model_type,"codebook_size":codebook_size}
 class VQETokenizer:
     """
     Nanopore Single-Layer VQ Tokenizer.
@@ -130,6 +146,7 @@ class VQETokenizer:
             cnn_type = 0
         else:
             cnn_type = ckpt_data['cnn_type']
+
         # ✅ 1. 从 checkpoint 中读取 cnn_type（关键！）
         if 'model_type' not in ckpt_data:
             print("Checkpoint does not contain 'cnn_type'. forced to 0")
@@ -138,29 +155,37 @@ class VQETokenizer:
             model_type = ckpt_data['model_type']
 
 
-
-        # ✅ 正确：从 model_state_dict 中找 codebook
-        state_dict = ckpt_data['model_state_dict']
-        embed_keys = [k for k in state_dict.keys() if "_codebook.embed" in k]
-        if not embed_keys:
-            raise RuntimeError("No codebook embedding found in checkpoint.")
-
-        # Assume single quantizer: key like 'quantizer._codebook.embed'
-        embed_key = embed_keys[0]
-        embed_tensor = state_dict[embed_key]  # shape: [codebook_size, dim] or [1, codebook_size, dim]
-
-        if len(embed_tensor.shape) == 3:
-            codebook_size = int(embed_tensor.shape[1])
-            dim = int(embed_tensor.shape[2])
-        elif len(embed_tensor.shape) == 2:
-            codebook_size = int(embed_tensor.shape[0])
-            dim = int(embed_tensor.shape[1])
+        # ✅ 1. 从 checkpoint 中读取 codebook_size（关键！）
+        if 'codebook_size' not in ckpt_data:
+            print("Checkpoint does not contain 'codebook_size'. forced to 0")
+            codebook_size = 0
+            raise RuntimeError(f"Unexpected codebook size: {codebook_size}")
         else:
-            raise RuntimeError(f"Unexpected codebook shape: {embed_tensor.shape}")
+            codebook_size = ckpt_data['codebook_size']
+
+        if codebook_size == 0:
+            raise RuntimeError(f"Unexpected codebook size: {codebook_size}")
+
+        ## ✅ 正确：从 model_state_dict 中找 codebook
+        state_dict = ckpt_data['model_state_dict']
+        #embed_keys = [k for k in state_dict.keys() if "_codebook.embed" in k]
+        #if not embed_keys:
+        #    raise RuntimeError("No codebook embedding found in checkpoint.")
+
+        ## Assume single quantizer: key like 'quantizer._codebook.embed'
+        #embed_key = embed_keys[0]
+        #embed_tensor = state_dict[embed_key]  # shape: [codebook_size, dim] or [1, codebook_size, dim]
+
+        #if len(embed_tensor.shape) == 3:
+        #    codebook_size = int(embed_tensor.shape[1])
+        #    dim = int(embed_tensor.shape[2])
+        #elif len(embed_tensor.shape) == 2:
+        #    codebook_size = int(embed_tensor.shape[0])
+        #    dim = int(embed_tensor.shape[1])
+        #else:
+        #    raise RuntimeError(f"Unexpected codebook shape: {embed_tensor.shape}")
 
         self.codebook_size = codebook_size
-        self.dim = dim
-        print(f"🎯 Inferred: codebook_size={codebook_size}, dim={dim}, cnn_type={cnn_type}")
 
         # --- Instantiate model ---
         if model_type == 1:
@@ -169,9 +194,26 @@ class VQETokenizer:
             self.model = NanoporeVQEModel_V2(codebook_size=codebook_size,cnn_type=cnn_type)
         elif model_type == 3:
             self.model = NanoporeVQEModel_V3(codebook_size=codebook_size,cnn_type=cnn_type)
+        elif model_type == 4:
+            self.model = NanoporeVQEModel_V4(codebook_size=codebook_size,cnn_type=cnn_type)
+        elif model_type == 5:
+            self.model = NanoporeVQEModel_V5(codebook_size=codebook_size,cnn_type=cnn_type)
+        elif model_type == 6:
+            self.model = NanoporeVQEModel_V6(codebook_size=codebook_size,cnn_type=cnn_type)
+        elif model_type == 7:
+            self.model = NanoporeVQEModel_V7(codebook_size=codebook_size,cnn_type=cnn_type)
+        elif model_type == 8:
+            self.model = NanoporeVQEModel_V8(codebook_size=codebook_size,cnn_type=cnn_type)
+        elif model_type == 9:
+            self.model = NanoporeVQEModel_V9(codebook_size=codebook_size,cnn_type=cnn_type)
+        elif model_type == 10:
+            self.model = NanoporeVQEModel_V10(codebook_size=codebook_size,cnn_type=cnn_type)
         else:
             raise RuntimeError(f"Unexpected model type: {model_type}")
-
+        
+        # 由CNN决定
+        self.dim = self.model.codebook_dim
+        print(f"🎯 Inferred: codebook_size={self.codebook_size}, dim={self.dim}, cnn_type={cnn_type}")
 
         if not hasattr(self.model, 'cnn_stride'):
             raise AttributeError("Model must define 'cnn_stride' (total downsampling rate).")
@@ -220,7 +262,7 @@ class VQETokenizer:
             padded = np.pad(signal, (0, self.chunk_size - L), mode='constant')
             x = torch.from_numpy(padded).float().unsqueeze(0).unsqueeze(0).to(self.device)
             with torch.no_grad():
-                recon,tokens,loss,loss_breakdown = self.model(x)  # returns [B, T] or [B, T, 1] → squeeze to [T]
+                recon,level_tokens,loss,tokens = self.model(x)  # returns [B, T] or [B, T, 1] → squeeze to [T]
             tokens = tokens.squeeze(0).cpu().numpy()
             if tokens.ndim == 2:
                 tokens = tokens[:, 0]  # take first (and only) layer
@@ -243,7 +285,7 @@ class VQETokenizer:
                 chunk = np.pad(chunk, (0, self.chunk_size - len(chunk)), mode='constant')
             x = torch.from_numpy(chunk).float().unsqueeze(0).unsqueeze(0).to(self.device)
             with torch.no_grad():
-                recon,tokens,loss,loss_breakdown = self.model(x)
+                recon,level_tokens,loss,tokens = self.model(x)
             tokens = tokens.squeeze(0).cpu().numpy()
             if tokens.ndim == 2:
                 tokens = tokens[:, 0]
@@ -340,7 +382,7 @@ class VQETokenizer:
             x = torch.from_numpy(batch_np).float().unsqueeze(1).to(self.device)
             
             with torch.no_grad():
-                recon, tokens, loss, loss_breakdown = self.model(x) 
+                recon, level_tokens, loss, tokens = self.model(x) 
             
             tokens_np = tokens.cpu().numpy()
             if tokens_np.ndim == 3:

@@ -28,6 +28,13 @@ from .dataset import NanoporeSignalDataset
 from .vqe_model_v1 import NanoporeVQEModel_V1
 from .vqe_model_v2 import NanoporeVQEModel_V2
 from .vqe_model_v3 import NanoporeVQEModel_V3
+from .vqe_model_v4 import NanoporeVQEModel_V4
+from .vqe_model_v5 import NanoporeVQEModel_V5
+from .vqe_model_v6 import NanoporeVQEModel_V6
+from .vqe_model_v7 import NanoporeVQEModel_V7
+from .vqe_model_v8 import NanoporeVQEModel_V8
+from .vqe_model_v9 import NanoporeVQEModel_V9
+from .vqe_model_v10 import NanoporeVQEModel_V10
 from accelerate import InitProcessGroupKwargs
 from datetime import timedelta
 
@@ -185,6 +192,114 @@ def load_checkpoint_metadata(path: str):
     return None
 
 
+# -*- coding: utf-8 -*-
+"""
+评估模块: 计算向量量化(VQ)模型的码本使用率、Top-K集中度、熵等指标。
+
+该模块提供了一个核心函数，用于在验证集上评估不同类型的VQ模型（VQ-VAE, EMA-VQ, Residual VQ）。
+它通过分布式训练环境（如Accelerate）运行，并计算一系列关键性能指标。
+"""
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from tqdm import tqdm
+
+
+# --- 1. 通用的单层码本指标计算函数 ---
+def calculate_single_codebook_metrics(
+    token_counts_np: np.ndarray,
+    total_tokens_in_layer: int,
+    codebook_size: int,
+    last_token_counts_np_global: np.ndarray # 传入对应层的 last_token_counts_np
+):
+    """
+    计算单个码本层（VQ1/2/3的整个码本，或RVQ的一个quantizer层）的指标。
+
+    此函数是评估流程的核心，封装了所有针对单个离散token分布的统计计算逻辑，
+    如使用率、集中度、熵和KL散度，实现了代码复用。
+
+    Args:
+        token_counts_np (np.ndarray): 该层码本的使用计数数组，形状为 (codebook_size,)。
+                                      每个索引i的值代表编码器输出的token i出现的次数。
+        total_tokens_in_layer (int): 该层产生的总token数量。
+                                     用于将计数转换为概率，计算归一化指标。
+        codebook_size (int): 码本大小，即可能的token总数。
+                             用于计算使用率和基础概率。
+        last_token_counts_np_global (np.ndarray): 该层上次的计数，用于计算KL散度。
+                                                  形状与token_counts_np相同。
+                                                  如果为None，则跳过KL散度计算。
+
+    Returns:
+        tuple: 包含以下元素的元组:
+               - kl_div (float): 当前分布相对于上次分布的KL散度。
+               - used_code_n (int): 当前被使用的码本条目数量（计数大于0的条目数）。
+               - usage_ratio (float): 码本使用率 (used_code_n / codebook_size)。
+               - top1_ratio ... top10_ratio (float): Top-1 到 Top-10 集中度比率。
+                                                     表示前N个最频繁token的出现频率相对于均匀分布的倍数。
+               - entropy_val (float): 当前token分布的香农熵（以2为底，单位bit）。
+               - last_token_counts_np_updated (np.ndarray): 本次的计数，用于更新该层的全局历史记录。
+    """
+    # 1. 计算基本指标
+    # 计算有多少个码本条目被实际使用过
+    used_code_n = np.count_nonzero(token_counts_np)
+    # 计算被使用码本的比例
+    usage_ratio = used_code_n / codebook_size
+
+    # 初始化返回指标
+    entropy_val = 0.0
+    # 初始化Top-N集中度指标
+    top1_ratio = top3_ratio = top5_ratio = top7_ratio = top9_ratio = top10_ratio = 0.0
+
+    # 如果该层没有任何token，则所有基于频率的指标都为0
+    if total_tokens_in_layer > 0:
+        # 对计数进行降序排序，以便快速获取最常用的token
+        sorted_counts = np.sort(token_counts_np)[::-1]
+        # 计算均匀分布下的基础概率
+        base_ratio = 1.0 / codebook_size
+
+        # 内部辅助函数，用于计算Top-N集中度
+        # 它衡量第N个最常见token的频率是均匀分布期望频率的多少倍
+        def get_ratio(rank):
+            return (sorted_counts[rank-1] / total_tokens_in_layer) / base_ratio if len(sorted_counts) >= rank else 0.0
+
+        top1_ratio = get_ratio(1)
+        top3_ratio = get_ratio(3)
+        top5_ratio = get_ratio(5)
+        top7_ratio = get_ratio(7)
+        top9_ratio = get_ratio(9)
+        # Top-10比率略有不同，计算的是前10个token的总频率占比
+        top10_ratio = (np.sum(sorted_counts[:10]) / total_tokens_in_layer) / base_ratio if len(sorted_counts) >= 10 else 0.0
+
+        # 计算香农熵 H(p) = -sum(p_i * log2(p_i))
+        prob = token_counts_np / total_tokens_in_layer
+        # 只对非零概率项求和，避免log(0)的问题
+        nz_prob = prob[prob > 0]
+        entropy_val = -np.sum(nz_prob * np.log2(nz_prob))
+
+    # 2. 计算 Kullback-Leibler (KL) 散度
+    # KL散度 D_KL(P_current || P_last) 衡量当前token分布与上次分布的差异
+    kl_div = 0.0
+    # 添加小的epsilon值以防止除以零和log(0)的情况
+    eps = 1e-10
+    current_prob = (token_counts_np + eps) / (total_tokens_in_layer + eps * codebook_size)
+
+    if last_token_counts_np_global is not None:
+        last_total = np.sum(last_token_counts_np_global)
+        last_prob = (last_token_counts_np_global + eps) / (last_total + eps * codebook_size)
+        # 计算 KL散度 D(P_current || P_Last)
+        kl_div = np.sum(current_prob * np.log(current_prob / last_prob))
+    # 如果 last_token_counts_np_global 为 None，则 kl_div 保持初始值 0.0
+
+    # 3. 返回更新后的 last_token_counts_np，供下次调用
+    # 返回当前层的计数，作为新的历史记录
+    updated_last_counts = token_counts_np.copy()
+
+    return (
+        kl_div, used_code_n, usage_ratio,
+        top1_ratio, top3_ratio, top5_ratio, top7_ratio, top9_ratio, top10_ratio,
+        entropy_val, updated_last_counts
+    )
 
 # =============================================================================
 # Main Training Function
@@ -199,6 +314,8 @@ def vqe_train(
     lr: float = 1e-4,
     num_epochs: int = 10,
     codebook_size: int = 8192,
+    codebook_decay: float = 0.99,
+    codebook_emadc: int = 2,
     chunk_size: int = 12000,
     num_workers: int = 8,
     update_loss_weight_every: int = 10,
@@ -270,6 +387,8 @@ def vqe_train(
         lr=lr,
         num_epochs=num_epochs,
         codebook_size=codebook_size,
+        codebook_decay=codebook_decay,
+        codebook_emadc=codebook_emadc,
         chunk_size=chunk_size,
         num_workers=num_workers,
         update_loss_weight_every=update_loss_weight_every,
@@ -336,8 +455,11 @@ def vqe_train(
                 "device_micro_batch_size": device_micro_batch_size, # Changed from 'batch_size'
                 "lr": lr,
                 "cnn_type":cnn_type,
+                "model_type":model_type,
                 "num_epochs": num_epochs,
                 "codebook_size": codebook_size,
+                "codebook_decay": codebook_decay,
+                "codebook_emadc": codebook_emadc,
                 "chunk_size": chunk_size,
                 "dataset_logic_chunk_size":dataset_logic_chunk_size,
                 "device_micro_batch_size":device_micro_batch_size,
@@ -387,285 +509,294 @@ def vqe_train(
     # Evaluation Setup
     # ========================
     val_loader = None
-    def evaluate_codebook_metrics():
-        """Evaluate codebook usage, top-k concentration, and entropy on validation set."""
-        if val_loader is None:
-            return 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-        # 关键：获取解包后的模型
-        #unwrapped_model = accelerator.unwrap_model(model)
-        #unwrapped_model.eval()
-        model.eval()
-        used_codes = set()
-        token_counts = np.zeros(codebook_size, dtype=np.int64)
-        total_tokens = 0
+    # 建议在类初始化或全局位置定义这个变量，用于持久化存储
+    # 记录上一次的码表推理命中频次分布
 
-        with torch.no_grad():
-            for batch in val_loader:
-                x = batch # No need to call .to(device), Accelerate handles it
-                # Ensure model input is correctly shaped if needed (e.g., adding batch dim)
-                # Example: if x.shape is [seq_len, feat_dim] and model expects [batch, seq_len, feat_dim]
-                # x = x.unsqueeze(0) # This adds the batch dimension
-                # However, since we are using batches from DataLoader, x should already have a batch dimension
-                # Assuming x shape is [batch_size, seq_len, feat_dim]
-                
-                # The model expects the correct shape; ensure your dataset/dataloader provides it.
-                # If your raw data from dataset has shape [seq_len, feat_dim], DataLoader makes it [device_micro_batch_size, seq_len, feat_dim]
-                # which should be fine for a model expecting [batch, seq_len, feat_dim].
-                # 关键：确保输入数据类型与模型参数类型匹配
-                #expected_dtype = next(unwrapped_model.parameters()).dtype
-                #if x.dtype != expected_dtype:
-                #    x = x.to(expected_dtype)
-                print("---")  
-                _, indices, _, _ = model(x) # Model input is handled by Accelerate
-                print("+++")
-                indices = indices.cpu().numpy().flatten()
-                used_codes.update(indices.tolist())
-                total_tokens += indices.size
-                for idx in indices:
-                    token_counts[idx] += 1
-
-        usage_ratio = len(used_codes) / codebook_size
-        top1_ratio = top3_ratio = top5_ratio = top7_ratio = top9_ratio = top10_ratio = 0.0
-        entropy_val = 0.0
-        max_entropy = np.log2(codebook_size)
-
-        if total_tokens > 0:
-            sorted_counts = np.sort(token_counts)[::-1]
-
-            base_ratio = 1/codebook_size
-            top1_ratio = sorted_counts[0] / total_tokens if len(sorted_counts) > 0 else 0.0
-            top3_ratio = sorted_counts[2] / total_tokens if len(sorted_counts) > 2 else 0.0
-            top5_ratio = sorted_counts[4] / total_tokens if len(sorted_counts) > 4 else 0.0
-            top7_ratio = sorted_counts[6] / total_tokens if len(sorted_counts) > 6 else 0.0
-            top9_ratio = sorted_counts[8] / total_tokens if len(sorted_counts) > 8 else 0.0
-
-            top1_ratio = top1_ratio/base_ratio
-            top3_ratio = top3_ratio/base_ratio
-            top5_ratio = top5_ratio/base_ratio
-            top7_ratio = top7_ratio/base_ratio
-            top9_ratio = top9_ratio/base_ratio
-
-            top10_ratio = float(sorted_counts[:min(9, codebook_size)].sum()) / total_tokens if len(sorted_counts) > 9 else 0.0
-            top10_ratio = top10_ratio/base_ratio
-
-            prob = token_counts / total_tokens
-            nonzero_prob = prob[prob > 0]
-            if nonzero_prob.size > 0:
-                entropy_val = -np.sum(nonzero_prob * np.log2(nonzero_prob))
-        #unwrapped_model.train()
-        model.train()
-        return (
-            usage_ratio, total_tokens,
-            top1_ratio, top3_ratio, top5_ratio, top7_ratio, top9_ratio, top10_ratio,
-            entropy_val, max_entropy
-        )
-
-    def evaluate_codebook_metrics_v3_old():
-        """Evaluate codebook usage, top-k concentration, and entropy on validation set."""
-        if val_loader is None:
-            return 0,0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-        used_code_n = 0
-        usage_ratio = 0.0
-        total_tokens = 0
-        top1_ratio = top3_ratio = top5_ratio = top7_ratio = top9_ratio = top10_ratio = 0.0
-        entropy_val = 0.0
-        max_entropy = np.log2(codebook_size) if codebook_size > 0 else 0.0
-        global_recon_loss_val = 0.0
-        global_comit_loss_val = 0.0
-
-        # --- 新增：评估前的 Batch 数量同步校验 ---
-        local_len = torch.tensor([len(val_loader)], device=accelerator.device)
-        all_lens = accelerator.gather(local_len)
-        
-        if accelerator.is_main_process:
-            counts = all_lens.tolist()
-            print(f"\n[Eval Step {global_step}] Batch distribution: {counts}")
-            if len(set(counts)) > 1:
-                print(f"❌ CRITICAL WARNING: Inconsistent batch counts detected! Process may hang at gather().")
-        # ---------------------------------------
-        model.eval()
-    
-        # 存储局部结果的列表
-        all_indices = []
-        local_recon_loss = 0.0
-        local_comit_loss = 0.0
-        num_batches = 0
-        # 初始化计数器 (在 GPU 上)
-        token_counts = torch.zeros(codebook_size, device=accelerator.device)
-        with torch.no_grad():
-            # 1. 仅在主进程创建 tqdm 进度条，禁用其他进程的进度条
-            # disable=not accelerator.is_main_process: 这是分布式训练的标配。它保证了只有 Rank 0 会打印那行进度条，其他 7 个进程默默干活。
-            # leave=False: 验证集通常每隔一段时间跑一次，设置为 False 可以让验证完后的进度条消失，不污染你的训练日志。
-            # 
-            pbar = tqdm(
-                val_loader,
-                desc=f"Eval Step {global_step}",
-                disable=not accelerator.is_main_process,
-                leave=False # 评估完成后自动清除，保持终端整洁
-            )
-            for i, batch in enumerate(pbar):
-                x = batch # 已被 accelerator 处理到正确设备
-                # 使用原模型（分布式包装后的），获取当前卡上的结果
-                recon, indices, _, loss_breakdown = model(x)
-                recon_loss = F.mse_loss(recon, x)
-                local_recon_loss += recon_loss.item()
-                local_comit_loss += loss_breakdown.commitment.item()
-                num_batches += 1
-                # 直接累加计数，不存原始 indices
-                flat_indices = indices.flatten()
-                token_counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float))
-                # 建议：每 100 个 batch 同步一次，维持分布式系统的“心跳”
-                #if i % 100 == 0:
-                #    accelerator.wait_for_everyone()
-        # 循环结束后，一次性同步计数器
-        global_token_counts = accelerator.reduce(token_counts, reduction="sum")
-        # --- 关键：聚合所有进程的数据 ---
-        # 1. 聚合损失 (计算全局平均)
-        # 将标量转换为 Tensor 以便 gather
-        metrics = torch.tensor([local_recon_loss, local_comit_loss, float(num_batches)], device=accelerator.device)
-        gathered_metrics = accelerator.gather(metrics).view(-1, 3) # [num_processes, 3]
-        
-        global_recon_loss = gathered_metrics[:, 0].sum() / gathered_metrics[:, 2].sum()
-        global_comit_loss = gathered_metrics[:, 1].sum() / gathered_metrics[:, 2].sum()
-
-        # 2. 聚合 Indices (用于计算 codebook usage 和 entropy)
-        local_indices = torch.cat(all_indices)
-        # 使用 gather_for_metrics 自动处理分布式采样可能产生的重复数据
-        global_indices = accelerator.gather_for_metrics(local_indices)
-
-
-        # --- 后期处理（仅在主进程计算统计量） ---
-        if accelerator.is_main_process:
-            indices_np = global_indices.cpu().numpy()
-            total_tokens = indices_np.size
-            
-            # 计算 Codebook 统计
-            token_counts = np.bincount(indices_np, minlength=codebook_size)
-            used_code_n = np.count_nonzero(token_counts)
-            usage_ratio = used_code_n / codebook_size
-            top1_ratio = top3_ratio = top5_ratio = top7_ratio = top9_ratio = top10_ratio = 0.0
-            entropy_val = 0.0
-            max_entropy = np.log2(codebook_size)
-            if total_tokens > 0:
-                sorted_counts = np.sort(token_counts)[::-1]
-                base_ratio = 1/codebook_size
-                top1_ratio = sorted_counts[0] / total_tokens if len(sorted_counts) > 0 else 0.0
-                top3_ratio = sorted_counts[2] / total_tokens if len(sorted_counts) > 2 else 0.0
-                top5_ratio = sorted_counts[4] / total_tokens if len(sorted_counts) > 4 else 0.0
-                top7_ratio = sorted_counts[6] / total_tokens if len(sorted_counts) > 6 else 0.0
-                top9_ratio = sorted_counts[8] / total_tokens if len(sorted_counts) > 8 else 0.0
-
-                top1_ratio = top1_ratio/base_ratio
-                top3_ratio = top3_ratio/base_ratio
-                top5_ratio = top5_ratio/base_ratio
-                top7_ratio = top7_ratio/base_ratio
-                top9_ratio = top9_ratio/base_ratio
-
-                top10_ratio = float(sorted_counts[:min(9, codebook_size)].sum()) / total_tokens if len(sorted_counts) > 9 else 0.0
-                top10_ratio = top10_ratio/base_ratio
-
-                prob = token_counts / total_tokens
-                nonzero_prob = prob[prob > 0]
-                if nonzero_prob.size > 0:
-                    entropy_val = -np.sum(nonzero_prob * np.log2(nonzero_prob))
-            model.train()
-            return (
-                used_code_n, usage_ratio, total_tokens,
-                top1_ratio, top3_ratio, top5_ratio, top7_ratio, top9_ratio, top10_ratio,
-                entropy_val, max_entropy, global_recon_loss.item(), global_comit_loss.item()
-            )
-        else:
-            model.train()
-            return None
+    # --- 2. 主评估函数 ---
+    # 全局变量，用于存储上一次评估时各层的token计数，以便计算KL散度
+    last_token_counts_np_0 = None
+    last_token_counts_np_1 = None
+    last_token_counts_np_2 = None # <-- 新增
+    last_token_counts_np_3 = None # <-- 新增
     def evaluate_codebook_metrics_v3():
-        """Evaluate codebook usage, top-k concentration, and entropy on validation set."""
-        if val_loader is None:
-            return 0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        """
+        在验证集上评估码本使用率、Top-K集中度和熵。
 
-        # 初始化变量
+        该函数负责模型推理、分布式张量聚合和最终指标计算的全过程。
+        它区分了单层模型（VQ1/2/3）和多层模型（RVQ），并统一调用上述通用函数。
+        现在返回每层的独立指标。
+        """
+        # 声明使用外部的非局部变量
+        nonlocal last_token_counts_np_0, last_token_counts_np_1,last_token_counts_np_2,last_token_counts_np_3
+
+        # 如果没有加载验证集，则返回默认值
+        if val_loader is None:
+            # 返回值的顺序: kl_div_0, used_codes_0, usage_ratio_0, total_tokens_0,
+            #              top1_ratio_0, top3_ratio_0, top5_ratio_0, top7_ratio_0, top9_ratio_0, top10_ratio_0,
+            #              entropy_val_0, 
+            #               kl_div_1, used_codes_1, usage_ratio_1, total_tokens_1,
+            #              top1_ratio_1, top3_ratio_1, top5_ratio_1, top7_ratio_1, top9_ratio_1, top10_ratio_1,
+            #              entropy_val_1, 
+            #              max_entropy, recon_loss, comit_loss
+            # 对于VQ1/2/3, 第二套指标 (_1) 将全部为0或默认值
+            default_metrics = [0.0] * 47
+            default_metrics[44] = np.log2(codebook_size) # max_entropy
+            default_metrics[45] = 0.0 # recon_loss placeholder
+            default_metrics[46] = 0.0 # comit_loss placeholder
+            return tuple(default_metrics)
+
+        # --- 初始化累积变量 ---
+        # 用于累加验证批次上的损失
         local_recon_loss = 0.0
         local_comit_loss = 0.0
         num_batches = 0
-        # 在 GPU 上初始化计数器
-        token_counts_gpu = torch.zeros(codebook_size, device=accelerator.device)
 
-        # 校验 Batch 分布
+        # --- 根据模型类型初始化分布式计数器 ---
+        # 将token计数张量分配到加速器设备（GPU）上，以便在推理时直接操作
+        if model_type in [1, 2, 3,8]: # VQ1/2/3: 整体一个码本，视为第0层
+            token_counts_gpu_0 = torch.zeros(codebook_size, device=accelerator.device)
+            token_counts_gpu_1 = None # 该模型类型无第二层
+            token_counts_gpu_2 = None # <-- 新增
+            token_counts_gpu_3 = None # <-- 新增
+        elif model_type in [4,5,6,10]: # RVQ: 明确为两层
+            #assert n_q == 2, f"For model_type 4, n_q must be 2, got {n_q}" # 确保模型配置正确
+            token_counts_gpu_0 = torch.zeros(codebook_size, device=accelerator.device)
+            token_counts_gpu_1 = torch.zeros(codebook_size, device=accelerator.device)
+            token_counts_gpu_2 = None # <-- 新增
+            token_counts_gpu_3 = None # <-- 新增
+        elif model_type in [7,9]: # RVQ: 明确为两层
+            #assert n_q == 2, f"For model_type 4, n_q must be 2, got {n_q}" # 确保模型配置正确
+            token_counts_gpu_0 = torch.zeros(codebook_size, device=accelerator.device)
+            token_counts_gpu_1 = torch.zeros(codebook_size, device=accelerator.device)
+            token_counts_gpu_2 = torch.zeros(codebook_size, device=accelerator.device)
+            token_counts_gpu_3 = torch.zeros(codebook_size, device=accelerator.device)
+        else:
+            raise ValueError(f"Unknown model_type: {model_type}")
+
+        # --- 分布式调试信息 ---
+        # 收集所有进程处理的batch数量，用于调试分布式训练是否均衡
         local_len = torch.tensor([len(val_loader)], device=accelerator.device)
         all_lens = accelerator.gather(local_len)
         if accelerator.is_main_process:
-            print(f"\n[Eval Step {global_step}] Batch distribution: {all_lens.tolist()}")
+            print(f"\n[Eval Step {global_step}] Batch distribution across processes: {all_lens.tolist()}")
 
-        model.eval()
-        with torch.no_grad():
-            pbar = tqdm(val_loader, desc=f"Eval Step {global_step}", 
-                        disable=not accelerator.is_main_process, leave=False)
-            
+        # --- 模型推理循环 ---
+        model.eval() # 设置模型为评估模式
+        with torch.no_grad(): # 禁用梯度计算以节省内存和提高速度
+            # 创建一个进度条，仅在主进程显示
+            pbar = tqdm(val_loader, desc=f"Eval Step {global_step}",disable=not accelerator.is_main_process, leave=False)
             for i, batch in enumerate(pbar):
-                x = batch
-                recon, indices, _, loss_breakdown = model(x)
-                
-                recon_loss = F.mse_loss(recon, x)
-                local_recon_loss += recon_loss.item()
-                local_comit_loss += loss_breakdown.commitment.item()
-                num_batches += 1
-                
-                # 核心优化：直接在 GPU 上统计，不需要 cat all_indices
-                flat_indices = indices.flatten()
-                token_counts_gpu.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float))
+                x = batch # 获取输入数据
+                # --- 模型前向传播与Token计数统计 ---
+                if model_type in [1, 2, 3]: # 处理 VQ-VAE, EMA-VQ 模型
+                    recon, indices, _, loss_breakdown = model(x)
+                    recon_loss = F.mse_loss(recon, x) # 计算重建损失
+                    local_recon_loss += recon_loss.item()
+                    local_comit_loss += loss_breakdown.commitment.item() # 累加承诺损失
 
-        # --- 分布式聚合 ---
-        # 1. 聚合计数器 (求和)
-        global_counts_tensor = accelerator.reduce(token_counts_gpu, reduction="sum")
-        
-        # 2. 聚合损失
+                    # 将多维indices展平为一维，统计所有token
+                    flat_indices = indices.flatten()
+                    # 使用scatter_add_原地更新计数张量，高效且内存友好
+                    token_counts_gpu_0.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float))
+                if model_type in [8]: # 处理 VQ-VAE, EMA-VQ 模型
+                    recon, indices = model(x)
+                    recon_loss = F.mse_loss(recon, x) # 计算重建损失
+                    local_recon_loss += recon_loss.item()
+                    local_comit_loss += 0.0 # 累加承诺损失
+                    # 将多维indices展平为一维，统计所有token
+                    flat_indices = indices.flatten()
+                    # 使用scatter_add_原地更新计数张量，高效且内存友好
+                    token_counts_gpu_0.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float))
+                elif model_type in [4,5,6,10]: # 处理 Residual Vector Quantization (RVQ) 模型
+                    recon, indices, all_loss, all_codes = model(x)
+                    recon_loss = F.mse_loss(recon, x)
+                    local_recon_loss = recon_loss.item() # RVQ的损失结构可能不同，此处按需调整
+                    local_comit_loss = 0.0 # RVQ的损失结构可能不同，此处置零
+
+                    # indices的形状为 [Batch_Size, Time_Steps, Num_Quantizers]
+                    B, T, n_quantizers = indices.shape
+                    assert n_quantizers == 2, f"Expected 2 quantizers, got {n_quantizers}"
+
+                    # 分别提取每一层的indices
+                    layer_0_indices = indices[:, :, 0].flatten() # [B*T]
+                    layer_1_indices = indices[:, :, 1].flatten() # [B*T]
+
+                    # --- 统计 Layer 0 ---
+                    # 应用掩码过滤掉无效token（例如-1）
+                    valid_mask_0 = (layer_0_indices >= 0) & (layer_0_indices < codebook_size)
+                    valid_flat_indices_0 = layer_0_indices[valid_mask_0]
+                    if valid_flat_indices_0.numel() > 0: # 检查是否有有效token
+                        token_counts_gpu_0.scatter_add_(0, valid_flat_indices_0, torch.ones_like(valid_flat_indices_0, dtype=torch.float))
+
+                    # --- 统计 Layer 1 ---
+                    valid_mask_1 = (layer_1_indices >= 0) & (layer_1_indices < codebook_size)
+                    valid_flat_indices_1 = layer_1_indices[valid_mask_1]
+                    if valid_flat_indices_1.numel() > 0:
+                        token_counts_gpu_1.scatter_add_(0, valid_flat_indices_1, torch.ones_like(valid_flat_indices_1, dtype=torch.float))
+                elif model_type in [7,9]: # <-- 新增
+                    # 处理 4-Level Residual Vector Quantization (RVQ) 模型
+                    recon, indices, all_loss, all_codes = model(x)
+                    recon_loss = F.mse_loss(recon, x)
+                    local_recon_loss = recon_loss.item()
+                    local_comit_loss = 0.0 # 假设类似RVQ
+                    # *** DEBUG: Print the dtype of indices ***
+                    #print(f"DEBUG: Model type {model_type}, indices dtype: {indices.dtype}")
+                    #print(f"DEBUG: Model type {model_type}, indices shape: {indices.shape}")
+                    # *** END OF DEBUG LINE ***
+                    # indices的形状为 [Batch_Size, Time_Steps, Num_Quantizers] -> [B, T, 4]
+                    B, T, n_quantizers = indices.shape
+                    assert n_quantizers == 4, f"Expected 4 quantizers for model_type 7, got {n_quantizers}"
+
+                    # 分别提取每一层的indices
+                    layer_0_indices = indices[:, :, 0].flatten() # [B*T]
+                    layer_1_indices = indices[:, :, 1].flatten() # [B*T]
+                    layer_2_indices = indices[:, :, 2].flatten() # [B*T]
+                    layer_3_indices = indices[:, :, 3].flatten() # [B*T]
+
+                    # --- 统计 Layer 0 ---
+                    valid_mask_0 = (layer_0_indices >= 0) & (layer_0_indices < codebook_size)
+                    valid_flat_indices_0 = layer_0_indices[valid_mask_0]
+                    if valid_flat_indices_0.numel() > 0:
+                        token_counts_gpu_0.scatter_add_(0, valid_flat_indices_0,torch.ones_like(valid_flat_indices_0, dtype=torch.float))
+
+                    # --- 统计 Layer 1 ---
+                    valid_mask_1 = (layer_1_indices >= 0) & (layer_1_indices < codebook_size)
+                    valid_flat_indices_1 = layer_1_indices[valid_mask_1]
+                    if valid_flat_indices_1.numel() > 0:
+                        token_counts_gpu_1.scatter_add_(0, valid_flat_indices_1,torch.ones_like(valid_flat_indices_1, dtype=torch.float))
+
+                    # --- 统计 Layer 2 ---
+                    valid_mask_2 = (layer_2_indices >= 0) & (layer_2_indices < codebook_size)
+                    valid_flat_indices_2 = layer_2_indices[valid_mask_2]
+                    if valid_flat_indices_2.numel() > 0:
+                        token_counts_gpu_2.scatter_add_(0, valid_flat_indices_2,torch.ones_like(valid_flat_indices_2, dtype=torch.float))
+
+                    # --- 统计 Layer 3 ---
+                    valid_mask_3 = (layer_3_indices >= 0) & (layer_3_indices < codebook_size)
+                    valid_flat_indices_3 = layer_3_indices[valid_mask_3]
+                    if valid_flat_indices_3.numel() > 0:
+                        token_counts_gpu_3.scatter_add_(0, valid_flat_indices_3,torch.ones_like(valid_flat_indices_3, dtype=torch.float))
+
+                num_batches += 1
+
+        # --- 分布式聚合 (All-Reduce) ---
+        # 将所有GPU上计算的计数结果汇总到一起
+        if model_type in [1, 2, 3,8]:
+            global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
+            global_counts_0 = global_counts_tensor_0.cpu().numpy() # 转换回CPU numpy数组以便计算
+            global_counts_1 = None
+            global_counts_2 = None
+            global_counts_3 = None
+        elif model_type in [4,5,6,10]:
+            global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
+            global_counts_tensor_1 = accelerator.reduce(token_counts_gpu_1, reduction="sum")
+            global_counts_0 = global_counts_tensor_0.cpu().numpy()
+            global_counts_1 = global_counts_tensor_1.cpu().numpy()
+            global_counts_2 = None
+            global_counts_3 = None
+        elif model_type in [7,9]:
+            global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
+            global_counts_tensor_1 = accelerator.reduce(token_counts_gpu_1, reduction="sum")
+            global_counts_tensor_2 = accelerator.reduce(token_counts_gpu_2, reduction="sum") # <-- 新增
+            global_counts_tensor_3 = accelerator.reduce(token_counts_gpu_3, reduction="sum") # <-- 新增
+            global_counts_0 = global_counts_tensor_0.cpu().numpy()
+            global_counts_1 = global_counts_tensor_1.cpu().numpy()
+            global_counts_2 = global_counts_tensor_2.cpu().numpy() # <-- 新增
+            global_counts_3 = global_counts_tensor_3.cpu().numpy() # <-- 新增
+        else:
+            # Should not reach here due to earlier check
+            global_counts_0 = global_counts_1 = global_counts_2 = global_counts_3 = None
+        # 聚合验证损失
         metrics = torch.tensor([local_recon_loss, local_comit_loss, float(num_batches)], device=accelerator.device)
         gathered_metrics = accelerator.gather(metrics).view(-1, 3)
 
-        # --- 后期处理（仅在主进程计算） ---
+        # --- 后期处理（仅在主进程执行） ---
         if accelerator.is_main_process:
             # 计算全局平均 Loss
             total_batches_all = gathered_metrics[:, 2].sum()
             global_recon_loss = (gathered_metrics[:, 0].sum() / total_batches_all).item()
             global_comit_loss = (gathered_metrics[:, 1].sum() / total_batches_all).item()
 
-            # 将计数器转到 CPU 供计算
-            token_counts_np = global_counts_tensor.cpu().numpy()
-            total_tokens = np.sum(token_counts_np)
+            # --- 计算每一层的指标 ---
+            # Layer 0 (对于 VQ1/2/3，这是唯一的层；对于 RVQ，这是第一层)
+            total_tokens_0 = int(np.sum(global_counts_0))
             
-            used_code_n = np.count_nonzero(token_counts_np)
-            usage_ratio = used_code_n / codebook_size
-            
-            entropy_val = 0.0
-            top1_ratio = top3_ratio = top5_ratio = top7_ratio = top9_ratio = top10_ratio = 0.0
-            
-            if total_tokens > 0:
-                sorted_counts = np.sort(token_counts_np)[::-1]
-                base_ratio = 1.0 / codebook_size
-                
-                # 计算 Top-N 集中度
-                def get_ratio(rank):
-                    return (sorted_counts[rank-1] / total_tokens) / base_ratio if len(sorted_counts) >= rank else 0.0
-
-                top1_ratio = get_ratio(1)
-                top3_ratio = get_ratio(3)
-                top5_ratio = get_ratio(5)
-                top7_ratio = get_ratio(7)
-                top9_ratio = get_ratio(9)
-                top10_ratio = (np.sum(sorted_counts[:10]) / total_tokens) / base_ratio if len(sorted_counts) >= 10 else 0.0
-
-                # 计算熵
-                prob = token_counts_np / total_tokens
-                nz_prob = prob[prob > 0]
-                entropy_val = -np.sum(nz_prob * np.log2(nz_prob))
-
-            model.train()
-            return (
-                used_code_n, usage_ratio, int(total_tokens),
-                top1_ratio, top3_ratio, top5_ratio, top7_ratio, top9_ratio, top10_ratio,
-                entropy_val, np.log2(codebook_size), global_recon_loss, global_comit_loss
+            # 计算Layer 0指标，并用其更新 last_token_counts_np_0
+            layer_0_metrics = calculate_single_codebook_metrics(
+                token_counts_np=global_counts_0,
+                total_tokens_in_layer=total_tokens_0,
+                codebook_size=codebook_size,
+                last_token_counts_np_global=last_token_counts_np_0 # 传入该层的全局变量
             )
-        else:
+            # 解包Layer 0的指标
+            kl_div_0, used_code_n_0, usage_ratio_0, top1_ratio_0, top3_ratio_0, top5_ratio_0, \
+                top7_ratio_0, top9_ratio_0, top10_ratio_0, entropy_val_0, last_token_counts_np_0 = layer_0_metrics # 更新该层的全局变量
+
+            # Layer 1 (仅 RVQ)
+            # 初始化Layer 1的指标，如果模型不是RVQ，这些将保持默认值
+            kl_div_1, used_code_n_1, usage_ratio_1, total_tokens_1, top1_ratio_1, top3_ratio_1, \
+            top5_ratio_1, top7_ratio_1, top9_ratio_1, top10_ratio_1, entropy_val_1 = 0.0, 0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
+            if global_counts_1 is not None: # 如果存在Layer 1的数据 (model_type == 4)
+                total_tokens_1 = int(np.sum(global_counts_1))
+                # 计算Layer 1指标，并用其更新 last_token_counts_np_1
+                layer_1_metrics = calculate_single_codebook_metrics(
+                    token_counts_np=global_counts_1,
+                    total_tokens_in_layer=total_tokens_1,
+                    codebook_size=codebook_size,
+                    last_token_counts_np_global=last_token_counts_np_1 # 传入该层的全局变量
+                )
+                # 解包Layer 1的指标
+                kl_div_1, used_code_n_1, usage_ratio_1, top1_ratio_1, top3_ratio_1, top5_ratio_1, \
+                    top7_ratio_1, top9_ratio_1, top10_ratio_1, entropy_val_1, last_token_counts_np_1 = layer_1_metrics # 更新该层的全局变量
+
+
+            # Layer 2 (仅 Model 7)
+            kl_div_2, used_code_n_2, usage_ratio_2, total_tokens_2, top1_ratio_2, top3_ratio_2, \
+            top5_ratio_2, top7_ratio_2, top9_ratio_2, top10_ratio_2, entropy_val_2 = 0.0, 0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            if global_counts_2 is not None: # 如果存在Layer 2的数据
+                total_tokens_2 = int(np.sum(global_counts_2))
+                layer_2_metrics = calculate_single_codebook_metrics(
+                    token_counts_np=global_counts_2,
+                    total_tokens_in_layer=total_tokens_2,
+                    codebook_size=codebook_size,
+                    last_token_counts_np_global=last_token_counts_np_2
+                )
+                kl_div_2, used_code_n_2, usage_ratio_2, top1_ratio_2, top3_ratio_2, top5_ratio_2, \
+                top7_ratio_2, top9_ratio_2, top10_ratio_2, entropy_val_2, last_token_counts_np_2 = layer_2_metrics
+            
+            # Layer 3 (仅 Model 7)
+            kl_div_3, used_code_n_3, usage_ratio_3, total_tokens_3, top1_ratio_3, top3_ratio_3, \
+            top5_ratio_3, top7_ratio_3, top9_ratio_3, top10_ratio_3, entropy_val_3 = 0.0, 0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            if global_counts_3 is not None: # 如果存在Layer 3的数据
+                total_tokens_3 = int(np.sum(global_counts_3))
+                layer_3_metrics = calculate_single_codebook_metrics(
+                    token_counts_np=global_counts_3,
+                    total_tokens_in_layer=total_tokens_3,
+                    codebook_size=codebook_size,
+                    last_token_counts_np_global=last_token_counts_np_3
+                )
+                kl_div_3, used_code_n_3, usage_ratio_3, top1_ratio_3, top3_ratio_3, top5_ratio_3, \
+                top7_ratio_3, top9_ratio_3, top10_ratio_3, entropy_val_3, last_token_counts_np_3 = layer_3_metrics
+
+
+            # 计算最大可能的熵（当token分布完全均匀时）
+            max_entropy = np.log2(codebook_size)
+
+            model.train() # 评估结束后，将模型切回训练模式
+            
+            # 返回每层的独立指标，总共 (11 * 4 layers) + max_entropy + 2 losses = 47 个返回值
+            # [Layer 0 指标 (0-10), Layer 1 指标 (11-21), Layer 2 指标 (22-32), Layer 3 指标 (33-43), max_entropy (44), loss (45, 46)]
+            return (
+                kl_div_0, used_code_n_0, usage_ratio_0, total_tokens_0, top1_ratio_0, top3_ratio_0, top5_ratio_0, top7_ratio_0, top9_ratio_0, top10_ratio_0, entropy_val_0,
+                kl_div_1, used_code_n_1, usage_ratio_1, total_tokens_1, top1_ratio_1, top3_ratio_1, top5_ratio_1, top7_ratio_1, top9_ratio_1, top10_ratio_1, entropy_val_1,
+                kl_div_2, used_code_n_2, usage_ratio_2, total_tokens_2, top1_ratio_2, top3_ratio_2, top5_ratio_2, top7_ratio_2, top9_ratio_2, top10_ratio_2, entropy_val_2,
+                kl_div_3, used_code_n_3, usage_ratio_3, total_tokens_3, top1_ratio_3, top3_ratio_3, top5_ratio_3, top7_ratio_3, top9_ratio_3, top10_ratio_3, entropy_val_3,
+                max_entropy, global_recon_loss, global_comit_loss
+            )
+        else: # 非主进程
             model.train()
+            # 非主进程不进行计算，返回None，由Accelerator框架处理同步
             return None
 
     if do_evaluate and evaluation_npy_dir and os.path.isdir(evaluation_npy_dir) and val_ratio > 0: # Only setup eval on main process initially
@@ -691,6 +822,8 @@ def vqe_train(
     if model_type == 1:
         model = NanoporeVQEModel_V1(
             codebook_size=codebook_size,
+            codebook_decay=codebook_decay,
+            codebook_emadc=codebook_emadc,
             commitment_weight=commitment_weight,
             codebook_diversity_loss_weight=codebook_diversity_loss_weight,
             orthogonal_reg_weight=orthogonal_reg_weight,
@@ -703,6 +836,8 @@ def vqe_train(
     elif model_type == 2:
         model = NanoporeVQEModel_V2(
             codebook_size=codebook_size,
+            codebook_decay=codebook_decay,
+            codebook_emadc=codebook_emadc,
             commitment_weight=commitment_weight,
             codebook_diversity_loss_weight=codebook_diversity_loss_weight,
             orthogonal_reg_weight=orthogonal_reg_weight,
@@ -715,6 +850,107 @@ def vqe_train(
     elif model_type == 3:
         model = NanoporeVQEModel_V3(
             codebook_size=codebook_size,
+            codebook_decay=codebook_decay,
+            codebook_emadc=codebook_emadc,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            cnn_type=cnn_type,
+            init_codebook_path=init_codebook_path,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+            learnable_codebook=learnable_codebook,
+        )
+    
+    elif model_type == 4:
+        model = NanoporeVQEModel_V4(
+            codebook_size=codebook_size,
+            codebook_decay=codebook_decay,
+            codebook_emadc=codebook_emadc,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            cnn_type=cnn_type,
+            init_codebook_path=init_codebook_path,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+            learnable_codebook=learnable_codebook,
+        )
+    elif model_type == 5:
+        model = NanoporeVQEModel_V5(
+            codebook_size=codebook_size,
+            codebook_decay=codebook_decay,
+            codebook_emadc=codebook_emadc,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            cnn_type=cnn_type,
+            init_codebook_path=init_codebook_path,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+            learnable_codebook=learnable_codebook,
+        )
+    elif model_type == 6:
+        model = NanoporeVQEModel_V6(
+            codebook_size=codebook_size,
+            codebook_decay=codebook_decay,
+            codebook_emadc=codebook_emadc,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            cnn_type=cnn_type,
+            init_codebook_path=init_codebook_path,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+            learnable_codebook=learnable_codebook,
+        )
+    elif model_type == 7:
+        model = NanoporeVQEModel_V7(
+            codebook_size=codebook_size,
+            codebook_decay=codebook_decay,
+            codebook_emadc=codebook_emadc,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            cnn_type=cnn_type,
+            init_codebook_path=init_codebook_path,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+            learnable_codebook=learnable_codebook,
+        )
+    elif model_type == 8:
+        model = NanoporeVQEModel_V8(
+            codebook_size=codebook_size,
+            codebook_decay=codebook_decay,
+            codebook_emadc=codebook_emadc,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            cnn_type=cnn_type,
+            init_codebook_path=init_codebook_path,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+            learnable_codebook=learnable_codebook,
+        )
+    elif model_type == 9:
+        model = NanoporeVQEModel_V9(
+            codebook_size=codebook_size,
+            codebook_decay=codebook_decay,
+            codebook_emadc=codebook_emadc,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            cnn_type=cnn_type,
+            init_codebook_path=init_codebook_path,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+            learnable_codebook=learnable_codebook,
+        )
+    elif model_type == 10:
+        model = NanoporeVQEModel_V10(
+            codebook_size=codebook_size,
+            codebook_decay=codebook_decay,
+            codebook_emadc=codebook_emadc,
             commitment_weight=commitment_weight,
             codebook_diversity_loss_weight=codebook_diversity_loss_weight,
             orthogonal_reg_weight=orthogonal_reg_weight,
@@ -901,9 +1137,8 @@ def vqe_train(
         print("=== 调试结束 ===\n")
     log_dict = {}
 
+    wandb_kldiv = 0.0
     wandb_total_tokens = 0
-    wandb_eval_recon_loss = 0
-    wandb_eval_comit_loss = 0
     wandb_codebook_usage = 0
     wandb_codebook_used  = 0
     wandb_codebook_top1_ratio = 0 
@@ -913,8 +1148,46 @@ def vqe_train(
     wandb_codebook_top9_ratio = 0
     wandb_codebook_top10_ratio = 0 
     wandb_codebook_entropy = 0
-    wandb_codebook_max_entropy = 0
+ 
+    wandb_kldiv_1 = 0.0
+    wandb_total_tokens_1 = 0
+    wandb_codebook_usage_1 = 0
+    wandb_codebook_used_1  = 0
+    wandb_codebook_top1_ratio_1 = 0 
+    wandb_codebook_top3_ratio_1 = 0
+    wandb_codebook_top5_ratio_1 = 0
+    wandb_codebook_top7_ratio_1 = 0
+    wandb_codebook_top9_ratio_1 = 0
+    wandb_codebook_top10_ratio_1 = 0 
+    wandb_codebook_entropy_1 = 0
+   
+    wandb_kldiv_2 = 0.0 # <-- 新增
+    wandb_total_tokens_2 = 0 # <-- 新增
+    wandb_codebook_usage_2 = 0 # <-- 新增
+    wandb_codebook_used_2 = 0 # <-- 新增
+    wandb_codebook_top1_ratio_2 = 0 # <-- 新增
+    wandb_codebook_top3_ratio_2 = 0 # <-- 新增
+    wandb_codebook_top5_ratio_2 = 0 # <-- 新增
+    wandb_codebook_top7_ratio_2 = 0 # <-- 新增
+    wandb_codebook_top9_ratio_2 = 0 # <-- 新增
+    wandb_codebook_top10_ratio_2 = 0 # <-- 新增
+    wandb_codebook_entropy_2 = 0 # <-- 新增
+    
+    wandb_kldiv_3 = 0.0 # <-- 新增
+    wandb_total_tokens_3 = 0 # <-- 新增
+    wandb_codebook_usage_3 = 0 # <-- 新增
+    wandb_codebook_used_3 = 0 # <-- 新增
+    wandb_codebook_top1_ratio_3 = 0 # <-- 新增
+    wandb_codebook_top3_ratio_3 = 0 # <-- 新增
+    wandb_codebook_top5_ratio_3 = 0 # <-- 新增
+    wandb_codebook_top7_ratio_3 = 0 # <-- 新增
+    wandb_codebook_top9_ratio_3 = 0 # <-- 新增
+    wandb_codebook_top10_ratio_3 = 0 # <-- 新增
+    wandb_codebook_entropy_3 = 0 # <-- 新增
 
+    wandb_codebook_max_entropy = 0
+    wandb_eval_recon_loss = 0
+    wandb_eval_comit_loss = 0
 
     if use_dynamic_commitment_weight:
         init_commitment_weight = commitment_weight
@@ -950,11 +1223,25 @@ def vqe_train(
                 # No need to manually move batch to device
                 x = batch
                 # Forward pass
-                recon, indices, break_loss, loss_breakdown = model(x)
-                recon_loss = F.mse_loss(recon, x)
-                comit_loss = loss_breakdown.commitment
-                diver_loss = loss_breakdown.codebook_diversity
-                ortho_loss = loss_breakdown.orthogonal_reg
+                if model_type in [1,2,3]:
+                    recon, indices, break_loss, loss_breakdown = model(x)
+                    recon_loss = F.mse_loss(recon, x)
+                    comit_loss = loss_breakdown.commitment
+                    diver_loss = loss_breakdown.codebook_diversity
+                    ortho_loss = loss_breakdown.orthogonal_reg
+                elif model_type in [4,5,6,7,9,10]:
+                    recon, indices, all_loss, all_codes = model(x)
+                    recon_loss = F.mse_loss(recon, x)
+                    comit_loss = torch.tensor(0.0)
+                    diver_loss = torch.tensor(0.0)
+                    ortho_loss = torch.tensor(0.0)
+                elif model_type in [8]:
+                    recon, indices = model(x)
+                    recon_loss = F.mse_loss(recon, x)
+                    comit_loss = torch.tensor(0.0)
+                    diver_loss = torch.tensor(0.0)
+                    ortho_loss = torch.tensor(0.0)
+
                 # 💡 ACTUAL LOSS: Fixed weights. DWA is NOT applied here.
                 total_loss = recon_loss + comit_loss * dynamic_commitment_weight
 
@@ -1040,16 +1327,53 @@ def vqe_train(
                         "evaluate/total_tokens": wandb_total_tokens, # Placeholder
                         "evaluate/recon_loss": wandb_eval_recon_loss, # Placeholder
                         "evaluate/comit_loss": wandb_eval_comit_loss, # Placeholder
+
+                        "codebook/kldiv": wandb_kldiv, # Placeholder
                         "codebook/usage": wandb_codebook_usage, # Placeholder
                         "codebook/used_codes": wandb_codebook_used, # Placeholder
                         "codebook/entropy": wandb_codebook_entropy, # Placeholder
                         "codebook/max_entropy": wandb_codebook_max_entropy, # Placeholder
-                        "topcode/top1_ratio": wandb_codebook_top1_ratio, # Placeholder
-                        "topcode/top3_ratio": wandb_codebook_top3_ratio, # Placeholder
-                        "topcode/top5_ratio": wandb_codebook_top5_ratio, # Placeholder
-                        "topcode/top7_ratio": wandb_codebook_top7_ratio, # Placeholder
-                        "topcode/top9_ratio": wandb_codebook_top9_ratio, # Placeholder
-                        "topcode/topx_ratio": wandb_codebook_top10_ratio, # Placeholder
+                        "codebook/top1_ratio": wandb_codebook_top1_ratio, # Placeholder
+                        "codebook/top3_ratio": wandb_codebook_top3_ratio, # Placeholder
+                        "codebook/top5_ratio": wandb_codebook_top5_ratio, # Placeholder
+                        "codebook/top7_ratio": wandb_codebook_top7_ratio, # Placeholder
+                        "codebook/top9_ratio": wandb_codebook_top9_ratio, # Placeholder
+                        "codebook/topx_ratio": wandb_codebook_top10_ratio, # Placeholder
+ 
+                        "codebook1/kldiv": wandb_kldiv_1, # Placeholder
+                        "codebook1/usage": wandb_codebook_usage_1, # Placeholder
+                        "codebook1/used_codes": wandb_codebook_used_1, # Placeholder
+                        "codebook1/entropy": wandb_codebook_entropy_1, # Placeholder
+                        "codebook1/top1_ratio": wandb_codebook_top1_ratio_1, # Placeholder
+                        "codebook1/top3_ratio": wandb_codebook_top3_ratio_1, # Placeholder
+                        "codebook1/top5_ratio": wandb_codebook_top5_ratio_1, # Placeholder
+                        "codebook1/top7_ratio": wandb_codebook_top7_ratio_1, # Placeholder
+                        "codebook1/top9_ratio": wandb_codebook_top9_ratio_1, # Placeholder
+                        "codebook1/topx_ratio": wandb_codebook_top10_ratio_1, # Placeholder
+   
+                        "codebook2/kldiv": wandb_kldiv_2, # <-- 新增
+                        "codebook2/usage": wandb_codebook_usage_2, # <-- 新增
+                        "codebook2/used_codes": wandb_codebook_used_2, # <-- 新增
+                        "codebook2/entropy": wandb_codebook_entropy_2, # <-- 新增
+                        "codebook2/top1_ratio": wandb_codebook_top1_ratio_2, # <-- 新增
+                        "codebook2/top3_ratio": wandb_codebook_top3_ratio_2, # <-- 新增
+                        "codebook2/top5_ratio": wandb_codebook_top5_ratio_2, # <-- 新增
+                        "codebook2/top7_ratio": wandb_codebook_top7_ratio_2, # <-- 新增
+                        "codebook2/top9_ratio": wandb_codebook_top9_ratio_2, # <-- 新增
+                        "codebook2/topx_ratio": wandb_codebook_top10_ratio_2, # <-- 新增
+                        
+                        "codebook3/kldiv": wandb_kldiv_3, # <-- 新增
+                        "codebook3/usage": wandb_codebook_usage_3, # <-- 新增
+                        "codebook3/used_codes": wandb_codebook_used_3, # <-- 新增
+                        "codebook3/entropy": wandb_codebook_entropy_3, # <-- 新增
+                        "codebook3/top1_ratio": wandb_codebook_top1_ratio_3, # <-- 新增
+                        "codebook3/top3_ratio": wandb_codebook_top3_ratio_3, # <-- 新增
+                        "codebook3/top5_ratio": wandb_codebook_top5_ratio_3, # <-- 新增
+                        "codebook3/top7_ratio": wandb_codebook_top7_ratio_3, # <-- 新增
+                        "codebook3/top9_ratio": wandb_codebook_top9_ratio_3, # <-- 新增
+                        "codebook3/topx_ratio": wandb_codebook_top10_ratio_3, # <-- 新增
+
+
                         "learning_rate": current_lr,
                         "lr_log10": lr_log10,
                         "epoch": epoch + 1,
@@ -1061,9 +1385,20 @@ def vqe_train(
                 if global_step % evaluate_every_spoch == 0:
                     accelerator.wait_for_everyone() # Sync all processes before eval
                     try:
+                        #kl_div_0, used_code_n_0, usage_ratio_0, total_tokens_0,
+                        #top1_ratio_0, top3_ratio_0, top5_ratio_0, top7_ratio_0, top9_ratio_0, top10_ratio_0,
+                        #entropy_val_0,
+                        #kl_div_1, used_code_n_1, usage_ratio_1, total_tokens_1,
+                        #top1_ratio_1, top3_ratio_1, top5_ratio_1, top7_ratio_1, top9_ratio_1, top10_ratio_1,
+                        #entropy_val_1,
+                        #max_entropy,
+                        #global_recon_loss,
+                        #global_comit_loss
+
                         result = evaluate_codebook_metrics_v3()
                         if accelerator.is_main_process and result is not None:
                             (
+                               wandb_kldiv,
                                wandb_codebook_used,
                                wandb_codebook_usage, 
                                wandb_total_tokens, 
@@ -1074,11 +1409,34 @@ def vqe_train(
                                wandb_codebook_top9_ratio,
                                wandb_codebook_top10_ratio, 
                                wandb_codebook_entropy, 
+ 
+                               wandb_kldiv_1,
+                               wandb_codebook_used_1,
+                               wandb_codebook_usage_1, 
+                               wandb_total_tokens_1, 
+                               wandb_codebook_top1_ratio_1, 
+                               wandb_codebook_top3_ratio_1,
+                               wandb_codebook_top5_ratio_1, 
+                               wandb_codebook_top7_ratio_1, 
+                               wandb_codebook_top9_ratio_1,
+                               wandb_codebook_top10_ratio_1, 
+                               wandb_codebook_entropy_1, 
+                             
+                               wandb_kldiv_2, wandb_codebook_used_2, wandb_codebook_usage_2, wandb_total_tokens_2,
+                               wandb_codebook_top1_ratio_2, wandb_codebook_top3_ratio_2, wandb_codebook_top5_ratio_2,
+                               wandb_codebook_top7_ratio_2, wandb_codebook_top9_ratio_2, wandb_codebook_top10_ratio_2,
+                               wandb_codebook_entropy_2,
+
+                               wandb_kldiv_3, wandb_codebook_used_3, wandb_codebook_usage_3, wandb_total_tokens_3,
+                               wandb_codebook_top1_ratio_3, wandb_codebook_top3_ratio_3, wandb_codebook_top5_ratio_3,
+                               wandb_codebook_top7_ratio_3, wandb_codebook_top9_ratio_3, wandb_codebook_top10_ratio_3,
+                               wandb_codebook_entropy_3,
+
                                wandb_codebook_max_entropy,
                                wandb_eval_recon_loss,
                                wandb_eval_comit_loss
                                ) = result
-                            print(f"Effective Step {global_step} - Codebook Usage: {wandb_codebook_usage:.2%}")
+                            print(f"Effective Step {global_step} - Codebook Usage: {wandb_codebook_usage:.2%} wandb_kldiv: {wandb_kldiv}")
                     except Exception as e:
                             print(f"Error during evaluation: {e}")
 
@@ -1154,6 +1512,8 @@ def main():
         lr=config.get("lr", 3e-4),
         num_epochs=config.get("num_epochs", 10),
         codebook_size=config.get("codebook_size", 8192),
+        codebook_decay=config.get("codebook_decay", 0.99),
+        codebook_emadc=config.get("codebook_emadc", 2),
         chunk_size=config.get("chunk_size", 12000),
         num_workers=config.get("num_workers", 8),
         val_ratio=config.get("val_ratio", 0.1),

@@ -5,76 +5,6 @@ from vector_quantize_pytorch import VectorQuantize
 from typing import Tuple, Dict
 # 导入新的 CNN 模型
 from .cnn_model import NanoporeCNNModel
-class Conv1dWithMeanChannel(nn.Module):
-    """
-    Conv1d层，其中第一个输出通道（索引0）是输入信号在卷积核窗口内的均值。
-    其余的输出通道由标准卷积操作生成。
-    注意：此版本的 in_channels 固定为 1，并使用优化的均值计算方法。
-    """
-    def __init__(self, out_channels, kernel_size, stride=1, padding=0, bias=False):
-        super(Conv1dWithMeanChannel, self).__init__()
-        self.in_channels = 1  # 固定为 1
-        self.out_channels = out_channels
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.padding = padding
-
-        if out_channels <= 0:
-            raise ValueError(f"out_channels 必须为正数，得到的是 {out_channels}")
-
-        # 创建一个专门用于计算均值的卷积层
-        # 权重初始化为 1/kernel_size，使得卷积结果为平均值
-        # 偏置设为 0
-        self.mean_conv = nn.Conv1d(
-            in_channels=1,
-            out_channels=1,  # 只需要一个输出通道来存放均值
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            bias=False # 不需要偏置
-        )
-        # 将权重设置为 1/kernel_size
-        with torch.no_grad():
-            self.mean_conv.weight.fill_(1.0 / kernel_size)
-
-        # 我们需要至少1个通道来存放均值。如果 out_channels > 1，
-        # 对其余的 (out_channels - 1) 个通道执行标准卷积。
-        self.use_standard_conv = out_channels > 1
-        if self.use_standard_conv:
-            # 为其余 (out_channels - 1) 个通道创建标准卷积层
-            self.std_conv = nn.Conv1d(1, out_channels - 1, kernel_size, stride=stride, padding=padding, bias=bias)
-
-    def forward(self, x):
-        """
-        前向传播函数。
-
-        Args:
-            x (torch.Tensor): 输入张量，形状为 [Batch_Size, 1, Input_Length] (因为 in_channels 固定为 1)
-
-        Returns:
-            torch.Tensor: 输出张量，形状为 [Batch_Size, out_channels, Output_Length]
-                          其中第一个通道是输入的局部均值。
-        """
-        # --- 计算局部均值 (优化版) ---
-        # 直接使用预设权重的卷积层来计算均值
-        # 该卷积层的权重为 [1/kernel_size, 1/kernel_size, ..., 1/kernel_size]
-        # 卷积运算自动完成了求和与除法，得到均值
-        mean_channel = self.mean_conv(x) # [B, 1, L_out]
-
-        # --- 构造最终输出 ---
-        if not self.use_standard_conv:
-            # 如果只需要1个输出通道，则直接返回计算出的均值通道
-            return mean_channel
-
-        # --- 如果需要更多通道 ---
-        # 对输入x执行标准卷积，生成其余的 (out_channels - 1) 个通道
-        std_conv_out = self.std_conv(x) # [B, out_ch - 1, L_out]
-
-        # 将计算出的均值通道（作为第一个）与标准卷积的结果通道拼接起来
-        output = torch.cat([mean_channel, std_conv_out], dim=1) # [B, out_ch, L_out]
-
-        return output
-
 
 class NanoporeVQEModel_V1(nn.Module):
     """
@@ -96,6 +26,9 @@ class NanoporeVQEModel_V1(nn.Module):
     def __init__(
         self,
         codebook_size: int = 8192,
+        codebook_decay: float = 0.99,
+        codebook_emadc: int = 2,
+
         commitment_weight: float = 1.0,
         orthogonal_reg_weight: float = 1.0,
         codebook_diversity_loss_weight: float = 1.0,
@@ -120,91 +53,26 @@ class NanoporeVQEModel_V1(nn.Module):
         """
         super().__init__()
 
-        # 设置 codebook_dim 根据 cnn_type
-        if cnn_type == 0:
-            codebook_dim = 256
-        elif cnn_type == 1:
-            codebook_dim = 64
-        elif cnn_type == 2:
-            codebook_dim = 512  # 固定为 512，与你提供的结构一致
-        elif cnn_type == 3:
-            codebook_dim = 64  # 固定为 512，与你提供的结构一致
-        elif cnn_type == 4:
-            codebook_dim = 32  # 固定为 512，与你提供的结构一致
-        elif cnn_type == 5:
-            codebook_dim = 16  # 固定为 512，与你提供的结构一致
-        elif cnn_type == 6:
-            codebook_dim = 128  # 固定为 512，与你提供的结构一致
-        elif cnn_type == 7:
-            codebook_dim = 256  # 固定为 512，与你提供的结构一致
-        elif cnn_type == 8:
-            codebook_dim = 512  # 固定为 512，与你提供的结构一致
-        elif cnn_type == 9:
-            codebook_dim = 512  # 固定为 512，与你提供的结构一致
-        else:
-            raise ValueError(f"Unsupported cnn_type: {cnn_type}. Supported: 0, 1, or 2.")
+        self.cnn_model = NanoporeCNNModel(cnn_type=cnn_type)
 
+        d_model = self.cnn_model.out_channels  # 自动设置为CNN输出维度
+        
+        codebook_dim = d_model
         self.codebook_dim = codebook_dim
         self.cnn_type = cnn_type
         self.latent_dim = codebook_dim
         self.codebook_size = codebook_size
+        self.cnn_stride = self.cnn_model.stride
+        self.RF = self.cnn_model.RF
+
+        # --- 在这里添加激活函数 ---
+        # 这个激活函数将在 VQ 之前应用，以规范化特征分布
+        self.activation_func = nn.SiLU() # 或者使用 nn.ReLU()
+        # --- 添加结束 --
+
+
         print(f"codebook_dim:{codebook_dim}")
-        # 构建 encoder 和 decoder
-        if cnn_type == 0:
-            self._build_encoder_type0()
-            self._build_decoder_type0()
-            self.cnn_stride = 5   # 总下采样率（仅最后一层 stride=5）
-            self.RF = 33          # 感受野（采样点），对应 ~1 个 RNA 碱基
-        elif cnn_type == 1:
-            self._build_encoder_type1()
-            self._build_decoder_type1()
-            self.cnn_stride = 5   # 总下采样率（仅最后一层 stride=5）
-            self.RF = 33          # 感受野（采样点），对应 ~1 个 RNA 碱基
-        elif cnn_type == 2:
-            self._build_encoder_type2()
-            self._build_decoder_type2()
-            self.cnn_stride = 12  # 1 * 1 * 3 * 2 * 2
-            self.RF = 65  #
-        elif cnn_type == 3:
-            self._build_encoder_type3()
-            self._build_decoder_type3()
-            self.cnn_stride = 5   # 总下采样率（仅最后一层 stride=5）
-            self.RF = 33          # 感受野（采样点），对应 ~1 个 RNA 碱基
-        elif cnn_type == 4:
-            self._build_encoder_type4()
-            self._build_decoder_type4()
-            self.cnn_stride = 5   # 总下采样率（仅最后一层 stride=5）
-            self.RF = 33          # 感受野（采样点），对应 ~1 个 RNA 碱基
-        elif cnn_type == 5:
-            self._build_encoder_type5()
-            self._build_decoder_type5()
-            self.cnn_stride = 5   # 总下采样率（仅最后一层 stride=5）
-            self.RF = 33          # 感受野（采样点），对应 ~1 个 RNA 碱基
-        elif cnn_type == 6:
-            self._build_encoder_type6()
-            self._build_decoder_type6()
-            self.cnn_stride = 5   # 总下采样率（仅最后一层 stride=5）
-            self.RF = 33          # 感受野（采样点），对应 ~1 个 RNA 碱基
-        elif cnn_type == 7:
-            self._build_encoder_type7()
-            self._build_decoder_type7()
-            self.cnn_stride = 5   # 总下采样率（仅最后一层 stride=5）
-            self.RF = 33          # 感受野（采样点），对应 ~1 个 RNA 碱基
-        elif cnn_type == 8:
-            self._build_encoder_type8()
-            self._build_decoder_type8()
-            self.cnn_stride = 5   # 总下采样率（仅最后一层 stride=5）
-            self.RF = 33          # 感受野（采样点），对应 ~1 个 RNA 碱基
-        elif cnn_type == 9:
-            self._build_encoder_type9()
-            self._build_decoder_type9()
-            self.cnn_stride = 12  # 1 * 1 * 3 * 2 * 2
-            self.RF = 65  #
-        else:
-            raise ValueError(f"Unsupported cnn_type: {cnn_type}. Supported: 0 or 1.")
-
-
-        # ======================================================================
+       # ======================================================================
         # VECTOR QUANTIZATION (VQ)
         # ======================================================================
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
@@ -219,8 +87,8 @@ class NanoporeVQEModel_V1(nn.Module):
             codebook_size=codebook_size,
             kmeans_init=True,
             kmeans_iters=10,
-            decay=0.99,
-            threshold_ema_dead_code=2,
+            decay=codebook_decay,
+            threshold_ema_dead_code=codebook_emadc,
             commitment_weight=commitment_weight,
             codebook_diversity_loss_weight=codebook_diversity_loss_weight,
             orthogonal_reg_weight=orthogonal_reg_weight,
@@ -437,463 +305,6 @@ class NanoporeVQEModel_V1(nn.Module):
         print(f"  cnn_type: {self.cnn_type}")
         print("-" * 60)
 
-    # ────────────────────────────────────────────────
-    # ENCODER BUILDERS
-    # ────────────────────────────────────────────────
-
-    def _build_encoder_type0(self) -> None:
-        """构建 cnn_type=0 的 encoder：1 → 64 → 128 → latent_dim（如 256）"""
-        self.encoder = nn.Sequential(
-            # Layer 1: 超局部特征提取（无下采样）
-            nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Layer 2: 局部上下文聚合（无下采样）
-            nn.Conv1d(64, 128, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Layer 3: 下采样 + 升维至 latent space（RF=33, stride=5）
-            nn.Conv1d(128, self.latent_dim, kernel_size=25, stride=5, padding=12, bias=False),
-            nn.BatchNorm1d(self.latent_dim),
-        )
-
-    def _build_encoder_type1(self) -> None:
-        """构建 cnn_type=1 的 encoder：1 → 16 → 32 → 64（严格对称）"""
-        self.encoder = nn.Sequential(
-            # Layer 1: 1 → 16
-            nn.Conv1d(1, 16, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(16),
-            nn.SiLU(),
-
-            # Layer 2: 16 → 32
-            nn.Conv1d(16, 32, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(32),
-            nn.SiLU(),
-
-            # Layer 3: 32 → 64, stride=5, RF=33
-            nn.Conv1d(32, 64, kernel_size=25, stride=5, padding=12, bias=False),
-            nn.BatchNorm1d(64),
-        )
-    def _build_encoder_type2(self) -> None:
-        """cnn_type=2: 多阶段下采样，总 stride=12，输出通道=512"""
-        self.encoder = nn.Sequential(
-            # Layer 1: 1 → 64, stride=1
-            nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Layer 2: 64 → 64, stride=1
-            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Layer 3: 64 → 128, stride=3
-            nn.Conv1d(64, 128, kernel_size=9, stride=3, padding=4, bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Layer 4: 128 → 128, stride=2
-            nn.Conv1d(128, 128, kernel_size=9, stride=2, padding=4, bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Layer 5: 128 → 512, stride=2
-            nn.Conv1d(128, self.latent_dim, kernel_size=5, stride=2, padding=2, bias=False),
-            nn.BatchNorm1d(self.latent_dim),
-        )
-    def _build_encoder_type3(self) -> None:
-        """构建 cnn_type=1 的 encoder：1 → 16 → 32 → 64（严格对称）
-        Modified: First layer has the first channel as local mean.
-        """
-        self.encoder = nn.Sequential(
-            # Layer 1: 1 → 16, 第一个通道(kernel_size=5区域内的均值)，其余15个通道来自标准卷积
-            # 注意：调用时不再需要传入 in_channels，因为它已被固定为 1
-            Conv1dWithMeanChannel(out_channels=16, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(16),
-            nn.SiLU(),
-
-            # Layer 2: 16 → 32
-            nn.Conv1d(16, 32, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(32),
-            nn.SiLU(),
-
-            # Layer 3: 32 → 64, stride=5, RF=33
-            nn.Conv1d(32, 64, kernel_size=25, stride=5, padding=12, bias=False),
-            nn.BatchNorm1d(64),
-        )
-
-    def _build_encoder_type4(self) -> None:
-        """构建 cnn_type=4 的 encoder：1 → 8 → 16 → 32（严格对称）
-        Modified: First layer has the first channel as local mean.
-        """
-        self.encoder = nn.Sequential(
-            # Layer 1: 1 → 8, 第一个通道(kernel_size=5区域内的均值)，其余7个通道来自标准卷积
-            Conv1dWithMeanChannel(out_channels=8, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(8),
-            nn.SiLU(),
-
-            # Layer 2: 8 → 16
-            nn.Conv1d(8, 16, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(16),
-            nn.SiLU(),
-
-            # Layer 3: 16 → 32, stride=5, RF=33
-            nn.Conv1d(16, 32, kernel_size=25, stride=5, padding=12, bias=False),
-            nn.BatchNorm1d(32),
-        )
-    def _build_encoder_type5(self) -> None:
-        """构建 cnn_type=4 的 encoder：1 → 8 → 16 → 32（严格对称）
-        Modified: First layer has the first channel as local mean.
-        """
-        self.encoder = nn.Sequential(
-            # Layer 1: 1 → 8, 第一个通道(kernel_size=5区域内的均值)，其余7个通道来自标准卷积
-            Conv1dWithMeanChannel(out_channels=4, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(4),
-            nn.SiLU(),
-
-            # Layer 2: 8 → 16
-            nn.Conv1d(4, 8, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(8),
-            nn.SiLU(),
-
-            # Layer 3: 16 → 32, stride=5, RF=33
-            nn.Conv1d(8, 16, kernel_size=25, stride=5, padding=12, bias=False),
-            nn.BatchNorm1d(16),
-        )
-    def _build_encoder_type6(self) -> None:
-        """构建 cnn_type=1 的 encoder：1 → 16 → 32 → 64（严格对称）
-        Modified: First layer has the first channel as local mean.
-        """
-        self.encoder = nn.Sequential(
-            # Layer 1: 1 → 16, 第一个通道(kernel_size=5区域内的均值)，其余15个通道来自标准卷积
-            # 注意：调用时不再需要传入 in_channels，因为它已被固定为 1
-            Conv1dWithMeanChannel(out_channels=32, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(32),
-            nn.SiLU(),
-
-            # Layer 2: 16 → 32
-            nn.Conv1d(32, 64, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Layer 3: 32 → 64, stride=5, RF=33
-            nn.Conv1d(64, 128, kernel_size=25, stride=5, padding=12, bias=False),
-            nn.BatchNorm1d(128),
-        )
-    def _build_encoder_type7(self) -> None:
-        """构建 cnn_type=1 的 encoder：1 → 16 → 32 → 64（严格对称）
-        Modified: First layer has the first channel as local mean.
-        """
-        self.encoder = nn.Sequential(
-            # Layer 1: 1 → 16, 第一个通道(kernel_size=5区域内的均值)，其余15个通道来自标准卷积
-            # 注意：调用时不再需要传入 in_channels，因为它已被固定为 1
-            Conv1dWithMeanChannel(out_channels=64, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Layer 2: 16 → 32
-            nn.Conv1d(64, 128, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Layer 3: 32 → 64, stride=5, RF=33
-            nn.Conv1d(128, 256, kernel_size=25, stride=5, padding=12, bias=False),
-            nn.BatchNorm1d(256),
-        )
-    def _build_encoder_type8(self) -> None:
-        """构建 cnn_type=1 的 encoder：1 → 16 → 32 → 64（严格对称）
-        Modified: First layer has the first channel as local mean.
-        """
-        self.encoder = nn.Sequential(
-            # Layer 1: 1 → 16, 第一个通道(kernel_size=5区域内的均值)，其余15个通道来自标准卷积
-            # 注意：调用时不再需要传入 in_channels，因为它已被固定为 1
-            Conv1dWithMeanChannel(out_channels=128, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Layer 2: 16 → 32
-            nn.Conv1d(128, 256, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(256),
-            nn.SiLU(),
-
-            # Layer 3: 32 → 64, stride=5, RF=33
-            nn.Conv1d(256, 512, kernel_size=25, stride=5, padding=12, bias=False),
-            nn.BatchNorm1d(512),
-        )
-    def _build_encoder_type9(self) -> None:
-        """cnn_type=2: 多阶段下采样，总 stride=12，输出通道=512"""
-        self.encoder = nn.Sequential(
-            # Layer 1: 1 → 64, stride=1
-            Conv1dWithMeanChannel(out_channels=64, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Layer 2: 64 → 64, stride=1
-            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Layer 3: 64 → 128, stride=3
-            nn.Conv1d(64, 128, kernel_size=9, stride=3, padding=4, bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Layer 4: 128 → 128, stride=2
-            nn.Conv1d(128, 128, kernel_size=9, stride=2, padding=4, bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Layer 5: 128 → 512, stride=2
-            nn.Conv1d(128, self.latent_dim, kernel_size=5, stride=2, padding=2, bias=False),
-            nn.BatchNorm1d(self.latent_dim),
-        )
-
-    # ────────────────────────────────────────────────
-    # DECODER BUILDERS
-    # ────────────────────────────────────────────────
-
-    def _build_decoder_type0(self) -> None:
-        """构建 cnn_type=0 的 decoder（近似对称，高维 refine）"""
-        self.decoder = nn.Sequential(
-            # Upsample ×5: 逆操作 encoder 最后一层
-            nn.ConvTranspose1d(
-                in_channels=self.latent_dim,
-                out_channels=128,
-                kernel_size=25,
-                stride=5,
-                padding=12,
-                output_padding=0,
-                bias=False,
-            ),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Refine layer: 消除棋盘伪影
-            nn.Conv1d(128, 64, kernel_size=5, padding=2,bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Final projection to raw signal
-            nn.Conv1d(64, 1, kernel_size=5,padding=2,bias=True),
-        )
-
-    def _build_decoder_type1(self) -> None:
-        """构建 cnn_type=1 的 decoder（严格对称：64 → 32 → 16 → 1）"""
-        self.decoder = nn.Sequential(
-            # Inverse of encoder Layer 3: 64 → 32
-            nn.ConvTranspose1d(
-                in_channels=64,
-                out_channels=32,
-                kernel_size=25,
-                stride=5,
-                padding=12,
-                output_padding=0,
-                bias=False,
-            ),
-            nn.BatchNorm1d(32),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 2: 32 → 16
-            nn.Conv1d(32, 16, kernel_size=5, padding=2,bias=False),
-            nn.BatchNorm1d(16),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 1: 16 → 1
-            nn.Conv1d(16, 1, kernel_size=5, padding=2,bias=True)
-        )
-    def _build_decoder_type2(self) -> None:
-        """严格对称 decoder: 512 → 128 → 128 → 64 → 64 → 1，上采样顺序与 encoder 下采样逆序对应"""
-        self.decoder = nn.Sequential(
-            # Inverse of encoder Layer 5: 512 → 128, upsample ×2
-            nn.ConvTranspose1d(512, 128, kernel_size=5, stride=2, padding=2, output_padding=0,bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 4: 128 → 128, upsample ×2
-            nn.ConvTranspose1d(128, 128, kernel_size=9, stride=2, padding=4, output_padding=0,bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 3: 128 → 64, upsample ×3
-            nn.ConvTranspose1d(128, 64, kernel_size=9, stride=3, padding=4, output_padding=0,bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 2: 64 → 64
-            nn.Conv1d(64, 64, kernel_size=5, padding=2,bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 1: 64 → 1
-            nn.Conv1d(64, 1, kernel_size=5,padding=2,bias=True)
-        )
-    def _build_decoder_type3(self) -> None:
-        """构建 cnn_type=1 的 decoder（严格对称：64 → 32 → 16 → 1）"""
-        self.decoder = nn.Sequential(
-            # Inverse of encoder Layer 3: 64 → 32
-            nn.ConvTranspose1d(
-                in_channels=64,
-                out_channels=32,
-                kernel_size=25,
-                stride=5,
-                padding=12,
-                output_padding=0,
-                bias=False,
-            ),
-            nn.BatchNorm1d(32),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 2: 32 → 16
-            nn.Conv1d(32, 16, kernel_size=5, padding=2,bias=False),
-            nn.BatchNorm1d(16),
-            nn.SiLU(),
-            # Inverse of encoder Layer 1: 16 → 1
-            nn.Conv1d(16, 1, kernel_size=5, padding=2,bias=True)
-        )
-    def _build_decoder_type4(self) -> None:
-        """构建 cnn_type=1 的 decoder（严格对称：32 → 16 → 8 → 1）"""
-        self.decoder = nn.Sequential(
-            # Inverse of encoder Layer 3: 32 → 16
-            nn.ConvTranspose1d(
-                in_channels=32,
-                out_channels=16,
-                kernel_size=25,
-                stride=5,
-                padding=12,
-                output_padding=0,
-                bias=False,
-            ),
-            nn.BatchNorm1d(16),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 2: 16 → 8
-            nn.Conv1d(16, 8, kernel_size=5, padding=2, bias=False),
-            nn.BatchNorm1d(8),
-            nn.SiLU(),
-            
-            # Inverse of encoder Layer 1: 8 → 1
-            nn.Conv1d(8, 1, kernel_size=5, padding=2, bias=True)
-        )
-    def _build_decoder_type5(self) -> None:
-        """构建 cnn_type=1 的 decoder（严格对称：16 → 8 → 4 → 1）"""
-        self.decoder = nn.Sequential(
-            # Inverse of encoder Layer 3: 32 → 16
-            nn.ConvTranspose1d(
-                in_channels=16,
-                out_channels=8,
-                kernel_size=25,
-                stride=5,
-                padding=12,
-                output_padding=0,
-                bias=False,
-            ),
-            nn.BatchNorm1d(8),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 2: 16 → 8
-            nn.Conv1d(8, 4, kernel_size=5, padding=2, bias=False),
-            nn.BatchNorm1d(4),
-            nn.SiLU(),
-            
-            # Inverse of encoder Layer 1: 8 → 1
-            nn.Conv1d(4, 1, kernel_size=5, padding=2, bias=True)
-        )
-    def _build_decoder_type6(self) -> None:
-        """构建 cnn_type=1 的 decoder（严格对称：64 → 32 → 16 → 1）"""
-        self.decoder = nn.Sequential(
-            # Inverse of encoder Layer 3: 64 → 32
-            nn.ConvTranspose1d(
-                in_channels=128,
-                out_channels=64,
-                kernel_size=25,
-                stride=5,
-                padding=12,
-                output_padding=0,
-                bias=False,
-            ),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 2: 32 → 16
-            nn.Conv1d(64, 32, kernel_size=5, padding=2,bias=False),
-            nn.BatchNorm1d(32),
-            nn.SiLU(),
-            # Inverse of encoder Layer 1: 16 → 1
-            nn.Conv1d(32, 1, kernel_size=5, padding=2,bias=True)
-        )
-    def _build_decoder_type7(self) -> None:
-        """构建 cnn_type=1 的 decoder（严格对称：64 → 32 → 16 → 1）"""
-        self.decoder = nn.Sequential(
-            # Inverse of encoder Layer 3: 64 → 32
-            nn.ConvTranspose1d(
-                in_channels=256,
-                out_channels=128,
-                kernel_size=25,
-                stride=5,
-                padding=12,
-                output_padding=0,
-                bias=False,
-            ),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 2: 32 → 16
-            nn.Conv1d(128, 64, kernel_size=5, padding=2,bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-            # Inverse of encoder Layer 1: 16 → 1
-            nn.Conv1d(64, 1, kernel_size=5, padding=2,bias=True)
-        )
-    def _build_decoder_type8(self) -> None:
-        """构建 cnn_type=1 的 decoder（严格对称：64 → 32 → 16 → 1）"""
-        self.decoder = nn.Sequential(
-            # Inverse of encoder Layer 3: 64 → 32
-            nn.ConvTranspose1d(
-                in_channels=512,
-                out_channels=256,
-                kernel_size=25,
-                stride=5,
-                padding=12,
-                output_padding=0,
-                bias=False,
-            ),
-            nn.BatchNorm1d(256),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 2: 32 → 16
-            nn.Conv1d(256, 128, kernel_size=5, padding=2,bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-            # Inverse of encoder Layer 1: 16 → 1
-            nn.Conv1d(128, 1, kernel_size=5, padding=2,bias=True)
-        )
-    def _build_decoder_type9(self) -> None:
-        """严格对称 decoder: 512 → 128 → 128 → 64 → 64 → 1，上采样顺序与 encoder 下采样逆序对应"""
-        self.decoder = nn.Sequential(
-            # Inverse of encoder Layer 5: 512 → 128, upsample ×2
-            nn.ConvTranspose1d(512, 128, kernel_size=5, stride=2, padding=2, output_padding=0,bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 4: 128 → 128, upsample ×2
-            nn.ConvTranspose1d(128, 128, kernel_size=9, stride=2, padding=4, output_padding=0,bias=False),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-
-            # Inverse of encoder Layer 3: 128 → 64, upsample ×3
-            nn.ConvTranspose1d(128, 64, kernel_size=9, stride=3, padding=4, output_padding=0,bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-            # Inverse of encoder Layer 2: 64 → 64
-            nn.Conv1d(64, 64, kernel_size=5, padding=2,bias=False),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-            # Inverse of encoder Layer 1: 64 → 1
-            nn.Conv1d(64, 1, kernel_size=5,padding=2,bias=True)
-        )
-
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict]:
         """
@@ -909,21 +320,27 @@ class NanoporeVQEModel_V1(nn.Module):
             loss_breakdown (dict): 损失分项（commitment, diversity, ortho...）
         """
         # Encode: [B, 1, T] → [B, C, T//5]
-        z_continuous = self.encoder(x)
+        z_continuous = self.cnn_model.encode(x)
 
         # Permute for VQ: [B, C, N] → [B, N, C]
         z_permuted = z_continuous.permute(0, 2, 1)
 
+        # --- 在这里应用激活函数，然后送入 VQ ---
+        #z_permuted_for_vq = self.activation_func(z_permuted)
+        z_permuted_for_vq = z_permuted
+        # --- 应用结束 ---
+
+
         # Quantize
         z_quantized_permuted, indices, loss, loss_breakdown = self.vq(
-            z_permuted, return_loss_breakdown=True
+            z_permuted_for_vq, return_loss_breakdown=True
         )
 
         # Back to [B, C, N] for decoder
         z_quantized = z_quantized_permuted.permute(0, 2, 1)
 
         # Decode
-        recon = self.decoder(z_quantized)
+        recon = self.cnn_model.decoder(z_quantized)
 
         # Length alignment: ensure recon length == input length
         target_len = x.shape[-1]

@@ -216,10 +216,10 @@ class Conv1dWithMeanAndThresholdChannels(nn.Module):
 class NanoporeCNNModel(nn.Module):
     """Nanopore 信号重建用纯卷积自编码器（无 VQ）。"""
 
-    def __init__(self, cnn_type: Literal[0, 1, 2,3,4,5,6,7,8,9,10] = 1) -> None:
+    def __init__(self, cnn_type: Literal[0, 1, 2,3,4,5,6,7,8,9,10,11,12] = 1) -> None:
         super().__init__()
 
-        if cnn_type not in (0, 1, 2,3,4,5,6,7,8,9,10):
+        if cnn_type not in (0, 1, 2,3,4,5,6,7,8,9,10,11,12):
             raise ValueError(f"`cnn_type` must be 0, 1 or 2,3,4,5 got {cnn_type}.")
 
         self.cnn_type: int = cnn_type
@@ -280,15 +280,29 @@ class NanoporeCNNModel(nn.Module):
         elif cnn_type == 9:
             self._build_cnn_type9()
             self.out_channels = 512
-            self.stride = 12
-            self.receptive_field = 65
-            self.RF = 65
+            self.stride = 8
+            self.receptive_field = 49
+            self.RF = 49
         elif cnn_type == 10:
             self._build_cnn_type10()
-            self.out_channels = 256
-            self.stride = 5
-            self.receptive_field = 33
-            self.RF = 33
+            self.out_channels = 512
+            self.stride = 3
+            self.receptive_field = 81
+            self.RF = 81
+        elif cnn_type == 11:
+            self._build_cnn_type11()
+            self.out_channels = 512
+            self.stride = 6
+            self.receptive_field = 65
+            self.RF = 65
+        elif cnn_type == 12:
+            self._build_cnn_type12()
+            self.out_channels = 512
+            self.stride = 4
+            self.receptive_field = 49
+            self.RF = 49
+
+
 
 
     # 现代 CNN  遵循“Conv → BN → Act” 的惯例。
@@ -702,12 +716,65 @@ class NanoporeCNNModel(nn.Module):
             # Inverse of encoder Layer 1: 16 → 1
             nn.Conv1d(128, 1, kernel_size=5, padding=2,bias=True)
         )
+    
+    # 末尾加SiLU,是为了送给VQ
+    # 如果最后一层没有激活函数
+    # 这可能是因为原始设计是用于纯自编码器的预训练，其目标是确定性地重建信号，此时保留原始的线性输出可能有助于保持信息的保真度。
+    # 当模型用于 VQ 时，其角色发生了变化。它不再是独立的自编码器，而是 VQ 模型的一个组件，其输出是 VQ 的输入。
+    # 此时，为了优化整个 VQ 系统，对编码器的输出进行一定的预处理（即通过一个激活函数）是合理且常见的。
+    # VQ 的核心思想是将连续的潜在向量（z）映射到离散的嵌入向量（e）空间。这个过程依赖于计算输入向量与代码本（codebook）中各个嵌入向量的距离。
+    # 如果编码器的输出 z 包含大量负值，这会使得代码本的训练变得更加困难。
+    # 因为距离计算（通常是欧氏距离）会受到正负值混合的影响，使得代码本需要学习如何在正负值混合的空间中进行有效的聚类。
+    # 激活函数的作用：
+    # nn.SiLU(x) = x * sigmoid(x) 或 nn.ReLU(x) = max(0, x) 等激活函数可以将特征映射到一个非负或半非负的范围（SiLU 会将大的负值推向 0，i
+    # 而 ReLU 直接将所有负值置为 0）。
+    # 好的，我们可以通过具体的数值例子来直观地理解激活函数（如 ReLU 和 SiLU）如何改变特征分布，以及这对向量量化（VQ）的代码本（codebook）学习有何益处。
+    # 核心概念回顾:
+    # VQ 的核心是计算输入向量 z 和代码本中嵌入向量 e_k 之间的欧氏距离 ||z - e_k||²。最小距离决定了 z 被映射到哪个离散的嵌入 e_k
+    # 例子 1：ReLU 激活函数的作用
+    # 假设输入：一个非常简单的输入向量 z_before_relu = [-2.0, -0.5, 0.1, 1.0]
+    # 应用 ReLU：ReLU(x) = max(0, x) 会将所有负值变为 0
+    # z_after_relu = ReLU(z_before_relu) = [0.0, 0.0, 0.1, 1.0]
+    # 对 VQ 的影响：
+    # 特征空间的改变：原本在四维空间 [-2.0, -0.5, 0.1, 1.0] 附近寻找最佳匹配的嵌入向量，现在变成了在 [0.0, 0.0, 0.1, 1.0] 附近寻找。
+    # 这个新点完全位于第一卦限（所有维度都非负）的边界上。
+    # 简化代码本学习：代码本现在不需要学习如何在负值区域进行有效的聚类。
+    # 它可以专注于学习一个在非负空间内有意义的离散表示集合。
+    # 例如，代码本可以学习 [0.0, 0.0, 0.0, 0.0] 作为一个表示“静默”或“背景”的嵌入，而 [0.0, 0.0, 0.5, 1.0] 可能表示一种特定的信号模式。
+    # 这使得代码本的嵌入向量更容易组织和学习。
+    # 例子 2：SiLU 激活函数的作用
+    # 假设输入：z_before_silu = [-2.0, -0.5, 0.1, 1.0]
+    # 应用 SiLU：
+    # SiLU(-2.0) = -2.0 * sigmoid(-2.0) = -2.0 * (1 / (1 + exp(2))) ≈ -2.0 * 0.12 ≈ -0.24
+    # SiLU(-0.5) = -0.5 * sigmoid(-0.5) = -0.5 * (1 / (1 + exp(0.5))) ≈ -0.5 * 0.38 ≈ -0.19
+    # SiLU(0.1) = 0.1 * sigmoid(0.1) = 0.1 * (1 / (1 + exp(-0.1))) ≈ 0.1 * 0.52 ≈ 0.05
+    # SiLU(1.0) = 1.0 * sigmoid(1.0) = 1.0 * (1 / (1 + exp(-1))) ≈ 1.0 * 0.73 ≈ 0.73
+    # z_after_silu = [-0.24, -0.19, 0.05, 0.73]
+    # 对 VQ 的影响：
+    # 软性处理负值：与 ReLU 的硬性截断不同，SiLU 对负值进行了“软性”处理。大的负值（如 -2.0）被显著削弱（变为 -0.24），而接近零或为正的值则被保留或轻微缩放。
+    # 特征空间的“收缩”：SiLU 将整个特征空间向原点方向“拉近”。对于 VQ 来说，这意味着输入 z 的动态范围变小了，代码本需要覆盖的范围也相应缩小，这使得学习过程更稳定。
+    # 保持信息：与 ReLU 彻底丢失负值信息不同，SiLU 保留了关于负值强度的信息（虽然削弱了），这可能对某些细微的信号模式识别是有用的。
+    # 假设我们有一个简化的二维情况，代码本中有一个嵌入向量 e_k = [0.2, 0.3]。
+    # 没有激活函数的输入 z1：z1 = [-1.0, 1.5]
+    #   距离 d1 = ||z1 - e_k||² = ||[-1.0 - 0.2, 1.5 - 0.3]||² = ||[-1.2, 1.2]||² = 1.44 + 1.44 = 2.88
+    # ● 经过 ReLU 的输入 z2：z2 = ReLU([-1.0, 1.5]) = [0.0, 1.5]
+    # ○ 距离 d2 = ||z2 - e_k||² = ||[0.0 - 0.2, 1.5 - 0.3]||² = ||[-0.2, 1.2]||² = 0.04 + 1.44 = 1.48
+    # ● 经过 SiLU 的输入 z3：z3 = SiLU([-1.0, 1.5]) ≈ [-0.27, 1.2]
+    # ○ 距离 d3 = ||z3 - e_k||² = ||[-0.27 - 0.2, 1.2 - 0.3]||² = ||[-0.47, 0.9]||² = 0.22 + 0.81 = 1.03
 
+    # 结论：
+    # 原始的 z1 包含负值，导致它与嵌入 e_k 的距离非常远 (2.88)。
+    # 经过 ReLU 或 SiLU 处理后，新的输入 z2 和 z3 与 e_k 的距离都显著减小 (1.48 和 1.03)。
+    # 这意味着代码本学习到的嵌入向量 e_k 现在可以更容易地“吸引”和代表那些经过激活函数处理后的特征向量。
+    # 这种“距离的规范化”使得 VQ 的学习过程更加高效和稳定，因为代码本不必在巨大的、充满负值的特征空间中艰难地寻找最优匹配。
+
+    # 个更优的折衷方案：不在 CNN 的最后一层加激活函数，而是在 VQ 之前加。
+    # 
     def _build_cnn_type9(self) -> None:
         """cnn_type=2: 多阶段下采样，总 stride=12，输出通道=512"""
         self.encoder = nn.Sequential(
             # Layer 1: 1 → 64, stride=1
-            Conv1dWithMeanChannel(out_channels=64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
             nn.BatchNorm1d(64),
             nn.SiLU(),
 
@@ -716,8 +783,8 @@ class NanoporeCNNModel(nn.Module):
             nn.BatchNorm1d(64),
             nn.SiLU(),
 
-            # Layer 3: 64 → 128, stride=3
-            nn.Conv1d(64, 128, kernel_size=9, stride=3, padding=4, bias=False),
+            # Layer 3: 64 → 128, stride=2
+            nn.Conv1d(64, 128, kernel_size=9, stride=2, padding=4, bias=False),
             nn.BatchNorm1d(128),
             nn.SiLU(),
 
@@ -733,17 +800,110 @@ class NanoporeCNNModel(nn.Module):
         """严格对称 decoder: 512 → 128 → 128 → 64 → 64 → 1，上采样顺序与 encoder 下采样逆序对应"""
         self.decoder = nn.Sequential(
             # Inverse of encoder Layer 5: 512 → 128, upsample ×2
-            nn.ConvTranspose1d(512, 128, kernel_size=5, stride=2, padding=2, output_padding=0,bias=False),
+            nn.ConvTranspose1d(512, 128, kernel_size=5, stride=2, padding=2, output_padding=1,bias=False),
             nn.BatchNorm1d(128),
             nn.SiLU(),
 
             # Inverse of encoder Layer 4: 128 → 128, upsample ×2
-            nn.ConvTranspose1d(128, 128, kernel_size=9, stride=2, padding=4, output_padding=0,bias=False),
+            nn.ConvTranspose1d(128, 128, kernel_size=9, stride=2, padding=4, output_padding=1,bias=False),
             nn.BatchNorm1d(128),
             nn.SiLU(),
 
-            # Inverse of encoder Layer 3: 128 → 64, upsample ×3
-            nn.ConvTranspose1d(128, 64, kernel_size=9, stride=3, padding=4, output_padding=0,bias=False),
+            # Inverse of encoder Layer 3: 128 → 64, upsample ×2
+            nn.ConvTranspose1d(128, 64, kernel_size=9, stride=2, padding=4, output_padding=1,bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Inverse of encoder Layer 2: 64 → 64
+            nn.Conv1d(64, 64, kernel_size=5, padding=2,bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Inverse of encoder Layer 1: 64 → 1
+            nn.Conv1d(64, 1, kernel_size=5,padding=2,bias=True)
+        )
+    def _build_cnn_type10(self) -> None:
+        """构建 cnn_type=1 的 encoder：1 → 16 → 32 → 64（严格对称）
+        Modified: First layer has the first channel as local mean.
+        """
+        self.encoder = nn.Sequential(
+            # Layer 1: 1 → 16, 第一个通道(kernel_size=5区域内的均值)，其余15个通道来自标准卷积
+            # 注意：调用时不再需要传入 in_channels，因为它已被固定为 1
+            Conv1dWithMeanChannel(out_channels=128, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+
+            # Layer 2: 16 → 32
+            nn.Conv1d(128, 256, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(256),
+            nn.SiLU(),
+
+            # Layer 3: 32 → 64, stride=5, RF=33
+            nn.Conv1d(256, 512, kernel_size=25, stride=3, padding=12, bias=False),
+            nn.BatchNorm1d(512),
+        )
+        """构建 cnn_type=1 的 decoder（严格对称：64 → 32 → 16 → 1）"""
+        self.decoder = nn.Sequential(
+            # Inverse of encoder Layer 3: 64 → 32
+            nn.ConvTranspose1d(
+                in_channels=512,
+                out_channels=256,
+                kernel_size=25,
+                stride=3,
+                padding=12,
+                output_padding=0,
+                bias=False,
+            ),
+            nn.BatchNorm1d(256),
+            nn.SiLU(),
+
+            # Inverse of encoder Layer 2: 32 → 16
+            nn.Conv1d(256, 128, kernel_size=5, padding=2,bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Inverse of encoder Layer 1: 16 → 1
+            nn.Conv1d(128, 1, kernel_size=5, padding=2,bias=True)
+        )
+
+    def _build_cnn_type11(self) -> None:
+        """cnn_type=2: 多阶段下采样，总 stride=12，输出通道=512"""
+        self.encoder = nn.Sequential(
+            # Layer 1: 1 → 64, stride=1
+            nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+
+            # Layer 2: 64 → 64, stride=1
+            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+
+            # Layer 3: 64 → 128, stride=2
+            nn.Conv1d(64, 128, kernel_size=9, stride=3, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+
+            # Layer 4: 128 → 128, stride=2
+            nn.Conv1d(128, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+
+            # Layer 5: 128 → 512, stride=2
+            nn.Conv1d(128, 512, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(512),
+        )
+        """严格对称 decoder: 512 → 128 → 128 → 64 → 64 → 1，上采样顺序与 encoder 下采样逆序对应"""
+        self.decoder = nn.Sequential(
+            # Inverse of encoder Layer 5: 512 → 128, upsample ×2
+            nn.ConvTranspose1d(512, 128, kernel_size=5, stride=1, padding=2, output_padding=0, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+
+            # Inverse of encoder Layer 4: 128 → 128, upsample ×2
+            nn.ConvTranspose1d(128, 128, kernel_size=9, stride=2, padding=4, output_padding=1,bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+
+            # Inverse of encoder Layer 3: 128 → 64, upsample ×2
+            nn.ConvTranspose1d(128, 64, kernel_size=9, stride=3, padding=4, output_padding=2,bias=False),
             nn.BatchNorm1d(64),
             nn.SiLU(),
             # Inverse of encoder Layer 2: 64 → 64
@@ -754,47 +914,58 @@ class NanoporeCNNModel(nn.Module):
             nn.Conv1d(64, 1, kernel_size=5,padding=2,bias=True)
         )
 
-    def _build_cnn_type10(self) -> None:
-        """构建 cnn_type=1 的 encoder：1 → 16 → 32 → 64（严格对称）
-        Modified: First layer has the first channel as local mean.
-        """
+    def _build_cnn_type12(self) -> None:
+        """cnn_type=2_stride4: 总 stride=4 (1,1,2,2,1)"""
         self.encoder = nn.Sequential(
-            # Layer 1: 1 → 16, 第一个通道(kernel_size=5区域内的均值)，其余15个通道来自标准卷积
-            # 注意：调用时不再需要传入 in_channels，因为它已被固定为 1
-            Conv1dWithMeanAndThresholdChannels(out_channels=64, kernel_size=5, stride=1, padding=2,bias=False,upper_threshold=4.99,lower_threshold=-4.99),
+            # Layer 1: stride=1, 提取基础波形特征
+            nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
             nn.BatchNorm1d(64),
             nn.SiLU(),
-
-            # Layer 2: 16 → 32
-            nn.Conv1d(64, 128, kernel_size=5, stride=1, padding=2, bias=False),
+        
+            # Layer 2: stride=1, 进一步平滑
+            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+        
+            # Layer 3: stride=2, 第一次下采样
+            nn.Conv1d(64, 128, kernel_size=9, stride=2, padding=4, bias=False),
             nn.BatchNorm1d(128),
             nn.SiLU(),
-
-            # Layer 3: 32 → 64, stride=5, RF=33
-            nn.Conv1d(128, 256, kernel_size=25, stride=5, padding=12, bias=False),
-            nn.BatchNorm1d(256),
+        
+            # Layer 4: stride=2, 第二次下采样
+            nn.Conv1d(128, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+        
+            # Layer 5: stride=1, 高维特征融合 (512通道)
+            nn.Conv1d(128, 512, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(512),
         )
-        """构建 cnn_type=1 的 decoder（严格对称：64 → 32 → 16 → 1）"""
+        
+        """严格对称 decoder"""
         self.decoder = nn.Sequential(
-            # Inverse of encoder Layer 3: 64 → 32
-            nn.ConvTranspose1d(
-                in_channels=256,
-                out_channels=128,
-                kernel_size=25,
-                stride=5,
-                padding=12,
-                output_padding=0,
-                bias=False,
-            ),
+            # L5 Inverse: 512 -> 128, stride 1
+            nn.Conv1d(512, 128, kernel_size=5, stride=1, padding=2, bias=False),
             nn.BatchNorm1d(128),
             nn.SiLU(),
-
-            # Inverse of encoder Layer 2: 32 → 16
-            nn.Conv1d(128, 64, kernel_size=5, padding=2,bias=False),
+        
+            # L4 Inverse: 128 -> 128, upsample x2
+            nn.ConvTranspose1d(128, 128, kernel_size=9, stride=2, padding=4, output_padding=1, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+        
+            # L3 Inverse: 128 -> 64, upsample x2
+            nn.ConvTranspose1d(128, 64, kernel_size=9, stride=2, padding=4, output_padding=1, bias=False),
             nn.BatchNorm1d(64),
             nn.SiLU(),
-            # Inverse of encoder Layer 1: 16 → 1
-            nn.Conv1d(64, 1, kernel_size=5, padding=2,bias=True)
+        
+            # L2 Inverse: 64 -> 64
+            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+        
+            # L1 Inverse: 64 -> 1
+            nn.Conv1d(64, 1, kernel_size=5, stride=1, padding=2, bias=True)
         )
 
 

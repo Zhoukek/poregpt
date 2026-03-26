@@ -79,7 +79,7 @@ def process_npy_file(npy_file_path,  output_path, tokenizer,max_batch_size):
 
             # Perform batched inference
             with torch.no_grad():
-                reconstructed_signals, tokens_tensor, loss, loss_breakdown = tokenizer.model(x) # tokens_tensor shape: (B, T_tokens) or (B, T_tokens, C)
+                reconstructed_signals, level_tokens_tensor, loss, tokens_tensor = tokenizer.model(x) # tokens_tensor shape: (B, T_tokens) or (B, T_tokens, C)
 
             # Move tokens to CPU and convert to numpy
             tokens_np = tokens_tensor.cpu().numpy() # Shape: (B, T_tokens) or (B, T_tokens, C)
@@ -104,13 +104,11 @@ def process_npy_file(npy_file_path,  output_path, tokenizer,max_batch_size):
                 # Since we don't have the original read ID here, we'll use the filename and chunk index
                 # Modify this ID generation logic if you have access to original read IDs stored elsewhere
                 chunk_id = f"{npy_file_path.stem}_chunk_{i+j}" # i is the batch start index, j is the index within the batch
-
                 # Append the result dictionary
                 results.append({
                     "id": chunk_id,
                     "text": joined_string
                 })
-
     except Exception as e:
         print(f"❌ Error processing {npy_file_path}: {e}")
         # Optionally, you could write partial results or log the error to a separate file

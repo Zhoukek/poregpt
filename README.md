@@ -194,12 +194,37 @@ tokenizer.tokenize_fast5(
 ## RVQ Tokenizer
 
 
-
-
 1. 预训练模型准备
 RVQ Tokenizer：将预训练 checkpoint 文件（如 nanopore_rvq_tokenizer_chunk12k.pth）放入项目 models/ 目录；
 KMeans Tokenizer：直接使用 models/ 目录下的 centroids.npy 聚类中心文件。
 2. 信号 Token 化示例
 RVQ Tokenizer 使用示例：参考 test/ 目录下 example_rvq_tokenizer_data.py；
 KMeans Tokenizer 使用示例：参考 test/ 目录下 example_kmeans_tokenize_data.py。
+
+
+
+# basecall语料准备
+
+## 对一批fast5文件计算对应的out_summary.processed.tsv文件和对应的references.npy文件
+
+### out_summary.processed.tsv 这个文件里的格式如下
+filename        read_id chunk_start     chunk_size      alignment_identity
+validation_00003.fast5  250F701901011_23_2561_1360_397804127_558818     3000    6000    1.0
+validation_00005.fast5  250F701901011_23_2561_1360_397804127_558818     6000    6000    1.0
+validation_00004.fast5  250F701901011_23_2561_1360_397804127_558818     9000    6000    1.0
+validation_00006.fast5  250F701901011_23_2561_1360_397804127_558818     12000   6000    1.0
+
+### references.npy里包含相同行数的np.array. 格式如下File: references.npy
+Data Type: uint8
+Shape: (537111, 762)
+Number of dimensions: 2
+Total number of elements: 409278582
+Size in bytes: 409278582
+
+### 合并tsv和npy文件 成 .bc.csv文件
+
+同时打开这两个文件，将npy里对应的数组读出来，把里面的0去掉。保存成12345这样的字符串， 然后增加一项 bases 用来表达这些数字字符串。 最后保存成csv: 表头是fast5, read_id, chunk_start, chunk_size, alignment_identity, bases
+
+脚本: merge_tsv_and_npy_to_bccsv.sh 就是来执行这个合并操作， 它的功能是递归遍历一个目录下的所有子目录，如果这个子目录中有out_summary.processed.tsv和references.npy，合并成一个以子目录命名的.bc.csv文件。并且用multiprocessing_pool来并行处理。
+
 

@@ -228,3 +228,100 @@ Size in bytes: 409278582
 脚本: merge_tsv_and_npy_to_bccsv.sh 就是来执行这个合并操作， 它的功能是递归遍历一个目录下的所有子目录，如果这个子目录中有out_summary.processed.tsv和references.npy，合并成一个以子目录命名的.bc.csv文件。并且用multiprocessing_pool来并行处理。
 
 
+# Attention（By kexuan）
+
+1. tokenizer训练入口（举例）：
+```
+在南湖开发环境的终端里：
+cd poregpt\workflows\vqe_workflow\step02_train_vqe_model\try
+./run.sh
+```
+2. 改进卷积核位置：
+```
+在config.yaml里的cnn_type=7
+然后根据cnn_type，在 poregpt\tokenizers\vqe_tokenizer\cnn_model.py
+里有不同的cnn架构
+if cnn_type == 0:
+  self._build_cnn_type0()
+  self.out_channels = 256
+  self.stride = 5
+  self.receptive_field = 33
+  self.RF = 33
+...
+
+elif cnn_type == 12:
+  self._build_cnn_type12()
+  self.out_channels = 512
+  self.stride = 4
+  self.receptive_field = 49
+  self.RF = 49
+
+```
+
+3. 码本构建方式修改：
+```
+poregpt\tokenizers\vqe_tokenizer\vqe_model_v1.py里的
+
+from vector_quantize_pytorch import VectorQuantize
+self.vq = VectorQuantize(
+            dim=self.latent_dim,
+            codebook_size=codebook_size,
+            kmeans_init=True,
+            kmeans_iters=10,
+            decay=codebook_decay,
+            threshold_ema_dead_code=codebook_emadc,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            orthogonal_reg_max_codes=256,
+            orthogonal_reg_active_codes_only=True,
+            learnable_codebook=learnable_codebook,
+            ema_update = ema_update,
+        )
+会有不同的码本构建方式，
+
+```
+
+4. chunk相关参数：
+```
+经过预处理策略的数据集，每个进来的chunk是12000
+
+config.yaml下：
+# 输入信号序列的长度 (每个样本的信号点数)
+chunk_size: 12000
+
+会有一个下一个chunk，把12000的再切掉
+dataset_logic_chunk_size: 2400  
+
+vqe_train.py中：
+train_dataset = NanoporeSignalDataset(shards_dir=train_npy_dir,logic_chunk_size=dataset_logic_chunk_size,logic_chunk_overlap_size=100)
+还会有一个logic_chunk_overlap_size=100，算出来最后是2560
+
+vqe_model_v3.py中：
+ def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict]:
+        """
+        前向传播函数 (升级版：支持 CNN + Transformer 架构)。
+
+        Args:
+            x (torch.Tensor): 输入信号，形状 [B, 1, T]
+                (例如: B=4, T=2560 -> )
+
+        Returns:
+            recon (torch.Tensor): 重建信号，[B, 1, T]
+            indices (torch.Tensor): VQ 离散 token，[B, N] (N = T // 5)
+            loss (torch.Tensor): VQ 总损失（标量）
+            loss_breakdown (dict): 损失分项（commitment, diversity, ortho...）
+        """
+
+        # ======================================================================
+        # 1. CNN 编码器 (特征提取)
+        #    目标：将原始长序列压缩为较短的特征序列
+        # ======================================================================
+        # 输入 x: [B, 1, T]
+        #   (B: Batch Size, 1: 单通道电信号, T: 信号长度 2560)
+        z_cnn = self.cnn_model.encode(x)
+        # 输出 z_cnn: [B, C_CNN, N]
+        #   (C_CNN: CNN 特征维度 = 128, N: 序列长度 = T//5 = 512)
+        #   例如:
+
+```

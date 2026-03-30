@@ -227,10 +227,86 @@ Size in bytes: 409278582
 
 脚本: merge_tsv_and_npy_to_bccsv.sh 就是来执行这个合并操作， 它的功能是递归遍历一个目录下的所有子目录，如果这个子目录中有out_summary.processed.tsv和references.npy，合并成一个以子目录命名的.bc.csv文件。并且用multiprocessing_pool来并行处理。
 
+# pipline（By kexuan）
+
+1. (第一阶段)tokenizer训练入口（举例）：
+```
+在南湖开发环境的终端里：
+cd poregpt\workflows\vqe_workflow\step02_train_vqe_model\try
+./run.sh
+```
+
+2. 二阶段代码暂时无
+
+3. (第三阶段)基模出来的特征做basecall训练
+
+~~~
+训练入口：/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/basecall_workflow/step00_train_ctc_bilstm_0305.sh
+~~~
+
+基模存放位置：/mnt/zzbnew/rnamodel/model/signalDNAmodel/HF_20m_DNA_VQE64K_CNN03_V20260203/base
+
+/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/basecall/model.py, BasecallModel带basecall head(上面的基模+head)
+~~~
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_path, trust_remote_code=True
+        )
+
+        if reset_backbone_weights:
+            backbone_config = AutoConfig.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+            )
+            self.backbone = AutoModel.from_config(
+                backbone_config,
+                trust_remote_code=True,
+            )
+        else:
+            self.backbone = AutoModel.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+            )
+        ...
+        
+        if self.head_type == "ctc_crf":
+            n_base = head_crf_n_base if head_crf_n_base is not None else (len(ID2BASE) - 1)
+            if head_crf_state_len is None:
+                if n_base <= 1:
+                    raise ValueError("Cannot infer head_crf_state_len with n_base <= 1.")
+                base = num_classes / (n_base + 1)
+                state_len = math.log(base, n_base) - 1
+                if not math.isclose(state_len, round(state_len)):
+                    raise ValueError("Unable to infer head_crf_state_len from num_classes and n_base.")
+                head_crf_state_len = int(round(state_len))
+            self.base_head = LinearCRFEncoder(
+                insize=self.pre_head.output_dim,
+                n_base=n_base,
+                state_len=head_crf_state_len,
+                bias=True,
+                scale=head_output_scale,
+                activation=head_output_activation,
+                blank_score=head_crf_blank_score,
+                expand_blanks=head_crf_expand_blanks,
+            )
+        elif self.head_type == "ctc":
+            self.base_head = LinearCTCEncoder(
+                insize=self.pre_head.output_dim,
+                num_classes=num_classes,
+                bias=True,
+                scale=head_output_scale,
+                activation=head_output_activation,
+            )
+        else:
+            raise ValueError(f"Unsupported head_type: {self.head_type}")
+~~~
+
+
+
+
 
 # Attention（By kexuan）
 
-1. tokenizer训练入口（举例）：
+1. (第一阶段)tokenizer训练入口（举例）：
 ```
 在南湖开发环境的终端里：
 cd poregpt\workflows\vqe_workflow\step02_train_vqe_model\try
@@ -325,3 +401,4 @@ vqe_model_v3.py中：
         #   例如:
 
 ```
+

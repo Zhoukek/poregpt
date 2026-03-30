@@ -465,6 +465,53 @@ self.vq = VectorQuantize(
 
 ```
 
+在/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/tokenizers/vqe_tokenizer 增加 vqe_model_vX.py
+然后在 /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/tokenizers/vqe_tokenizer/vqe_train.py和/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/tokenizers/vqe_tokenizer/vqe_tokenizer.py 的导入部分里加
+
+~~~
+from .vqe_model_vX import NanoporeVQEModel_VX
+
+增加或修改：
+
+    elif model_type == X:
+        model = NanoporeVQEModel_VX(
+            codebook_size=codebook_size,
+            codebook_decay=codebook_decay,
+            codebook_emadc=codebook_emadc,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            cnn_type=cnn_type,
+            init_codebook_path=init_codebook_path,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+            learnable_codebook=learnable_codebook
+        )
+
+修改码本方法，修改下面的部分，换成其他的码本构建方法：
+
+        self.vq = VectorQuantize(
+            dim=d_model,
+            codebook_size=codebook_size,
+            kmeans_init=True,
+            kmeans_iters=10,
+            decay=codebook_decay,
+            threshold_ema_dead_code=codebook_emadc,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            orthogonal_reg_max_codes=256,
+            orthogonal_reg_active_codes_only=True,
+            learnable_codebook=learnable_codebook,
+            ema_update = ema_update,
+        )
+
+并修改 conifg.yaml 的model_type部分
+~~~
+
+
+
+
 3. chunk相关参数：
 ```
 经过预处理策略的数据集，每个进来的chunk是12000

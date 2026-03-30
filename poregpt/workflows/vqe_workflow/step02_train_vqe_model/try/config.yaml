@@ -6,9 +6,9 @@
 # 训练数据集目录 (包含 .npy 文件)
 # === 数据路径 ===
 # 训练数据集目录 (包含 .npy 文件)
-train_npy_dir: "/mnt/si003067jezr/default/poregpt/dataset/human_dna_595g/memap_mongoq30/train"
+train_npy_dir: "/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/trank/train"
 # 验证数据集目录 (可选，如果 do_evaluate 为 True 则需要)
-evaluation_npy_dir: "/mnt/si003067jezr/default/poregpt/dataset/human_dna_595g/memap_mongoq30/validation"
+evaluation_npy_dir: "/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/trank/validation"
 
 
 # === 输出与检查点 ===
@@ -64,16 +64,17 @@ cpu: false
 # === 模型架构与量化 ===
 # VQ-VAE 中的码本 (Codebook) 大小，决定了 token 的数量
 #codebook_size: 262144
-codebook_size: 81920
+# codebook_size: 81920
+codebook_size: 64000
 # 90k
-codebook_size: 92160
-# 98304
-codebook_size: 98304
-codebook_size: 106496
-codebook_size: 104688
-codebook_size: 122880
-codebook_size: 122880
-codebook_size: 131072
+# codebook_size: 92160
+# # 98304
+# codebook_size: 98304
+# codebook_size: 106496
+# codebook_size: 104688
+# codebook_size: 122880
+# codebook_size: 122880
+# codebook_size: 131072
 #codebook_size: 49152
 # VQ 码本嵌入维度 (此参数由模型内部决定，通常不在配置文件中显式设置)
 # codebook_dim: 64 # 此行是代码内部变量，已从配置中移除
@@ -144,4 +145,4 @@ use_wandb: true
 # WandB 项目名称
 wandb_project: "train_vqe_dna04g"
 # 当前运行的实验名称
-wandb_name: "pass140_dna595g_scratch_c120k_cnn07_lr2e5_db32gb2048_lc2400-mongoq30-dcw09-m4-freeze01k"
+wandb_name: "test-zhoukexuan"

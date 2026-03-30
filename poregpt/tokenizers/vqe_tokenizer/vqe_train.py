@@ -28,13 +28,13 @@ from .dataset import NanoporeSignalDataset
 from .vqe_model_v1 import NanoporeVQEModel_V1
 from .vqe_model_v2 import NanoporeVQEModel_V2
 from .vqe_model_v3 import NanoporeVQEModel_V3
-from .vqe_model_v4 import NanoporeVQEModel_V4
-from .vqe_model_v5 import NanoporeVQEModel_V5
-from .vqe_model_v6 import NanoporeVQEModel_V6
-from .vqe_model_v7 import NanoporeVQEModel_V7
-from .vqe_model_v8 import NanoporeVQEModel_V8
-from .vqe_model_v9 import NanoporeVQEModel_V9
-from .vqe_model_v10 import NanoporeVQEModel_V10
+# from .vqe_model_v4 import NanoporeVQEModel_V4
+# from .vqe_model_v5 import NanoporeVQEModel_V5
+# from .vqe_model_v6 import NanoporeVQEModel_V6
+# from .vqe_model_v7 import NanoporeVQEModel_V7
+# from .vqe_model_v8 import NanoporeVQEModel_V8
+# from .vqe_model_v9 import NanoporeVQEModel_V9
+# from .vqe_model_v10 import NanoporeVQEModel_V10
 from accelerate import InitProcessGroupKwargs
 from datetime import timedelta
 
@@ -1483,6 +1483,8 @@ def vqe_train(
             spoch=spoch,
             global_step=global_step,
             cnn_type=cnn_type,
+            model_type=model_type,
+            dynamic_commitment_weight=dynamic_commitment_weight,
             accelerator=accelerator
         )
     # Clean up Accelerator resources

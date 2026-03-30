@@ -31,7 +31,7 @@ outdir="/mnt/zzbnew/rnamodel/model/signalDNAmodel/${model_name}/${wandb_run_name
 mkdir -p "${outdir}"
 
 
-export WANDB_API_KEY=748830e9b9acdf804bb0baad0eb82e6ca2592354
+export WANDB_API_KEY=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
 
 
 torchrun --nproc_per_node="${nproc_per_node}" --nnodes=1 -m poregpt.basecall.train_ddp_multifolder \

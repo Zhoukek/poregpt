@@ -227,24 +227,60 @@ Size in bytes: 409278582
 
 脚本: merge_tsv_and_npy_to_bccsv.sh 就是来执行这个合并操作， 它的功能是递归遍历一个目录下的所有子目录，如果这个子目录中有out_summary.processed.tsv和references.npy，合并成一个以子目录命名的.bc.csv文件。并且用multiprocessing_pool来并行处理。
 
-# pipline（By kexuan）
+# 开发环境相关（By Kexuan）
 
-1. (第一阶段)tokenizer训练入口（举例）：
+1. 登录邹老师账号，选取V5000+W64集群，新建开发环境，
+
+选取镜像： 10.200.53.208/003067/w64-olmo-poregpt:5.0.0-ccf5
+
+选取GPU（两卡或八卡）
+
+挂载存储： si003067jezr/default、zzbnew/dnadata、zzbnew/rnamodel、zzbnew/default、
+
+2. 共享给个人账号
+
+3. 镜像包含了运行所需的各类代码库，在国产卡沐曦上新建conda环境会比较麻烦，直接在南湖系统上打开开发环境的终端，然后在这个终端里bash run.sh脚本
+
+# pipline（By Kexuan）
+
+
+![Markdown Logo](./assets/pipline.png)
+
+
+## 1. (第一阶段)tokenizer训练入口（举例，已调整完毕）：
 ```
 在南湖开发环境的终端里：
 cd poregpt\workflows\vqe_workflow\step02_train_vqe_model\try
+
 ./run.sh
 ```
 
-2. 二阶段代码暂时无
+**PS：一阶段所用数据集：**
 
-3. (第三阶段)基模出来的特征做basecall训练
+(小，快速验证)：/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/trank
+
+(大，完整数据集-焦老师预处理策略)：/mnt/si003067jezr/default/poregpt/dataset/human_dna_595g/memap_mongoq30/trank
+
+(大，完整数据集-huada预处理策略)：/mnt/si003067jezr/default/poregpt/dataset/human_dna_595g/memap_stoneq0
+
+## 2. (第二阶段)基座模型的训练
+
+~~~
+训练入口：/mnt/nas_syy/default/poregpt
+
+二阶段存储的盘nas_syy还未分配到邹老师的南湖账号上
+
+后续看是否可以拿到这个盘，以及上面的代码
+
+~~~
+
+## 3. (第三阶段)基模出来的特征做basecall训练
 
 ~~~
 训练入口：/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/basecall_workflow/step00_train_ctc_bilstm_0305.sh
 ~~~
 
-基模存放位置：/mnt/zzbnew/rnamodel/model/signalDNAmodel/HF_20m_DNA_VQE64K_CNN03_V20260203/base
+基模存放位置(举例)：/mnt/zzbnew/rnamodel/model/signalDNAmodel/HF_20m_DNA_VQE64K_CNN03_V20260203/base
 
 /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/basecall/model.py, BasecallModel带basecall head(上面的基模+head)
 ~~~
@@ -300,19 +336,90 @@ cd poregpt\workflows\vqe_workflow\step02_train_vqe_model\try
             raise ValueError(f"Unsupported head_type: {self.head_type}")
 ~~~
 
+~~~
+BasecallModel的forward，输入的是input_ids：
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.feature_source == "embedding":
+            embedding_layer = self.backbone.get_input_embeddings()
+            if embedding_layer is None:
+                raise ValueError("Backbone does not expose input embeddings via get_input_embeddings().")
+            hidden = embedding_layer(input_ids)
+        else:
+            outputs = self.backbone(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+
+            hidden_states = outputs.hidden_states  # tuple(len = n_layers + 1)
+
+            try:
+                hidden = hidden_states[self.hidden_layer]
+            except IndexError:
+                raise ValueError(
+                    f"hidden_layer={self.hidden_layer} out of range "
+                    f"(num hidden states = {len(hidden_states)})"
+                )
+
+        hidden = self.pre_head(hidden)
+        logits_btc = self.base_head(hidden)
+        return logits_btc
+~~~
+
+基座是冻结的，或是解冻最后几层：
+
+~~~
+位于poregpt/basecall/model.py：
+
+        # ✅ 冻结基座（核心）
+        if self.freeze_backbone or self.unfreeze_last_n_layers > 0 or unfreeze_layer_start is not None or unfreeze_layer_end is not None:
+            for p in self.backbone.parameters():
+                p.requires_grad = False
+            if self.freeze_backbone and self.unfreeze_last_n_layers == 0:
+                self.backbone.eval()  # 固定 dropout 等推理行为（推荐）
+
+        # ✅ 可选：仅解冻最后 N 层
+        if self.unfreeze_last_n_layers > 0 or unfreeze_layer_start is not None or unfreeze_layer_end is not None:
+            layers = self._get_transformer_layers()
+            n_layers = len(layers)
+            if unfreeze_layer_start is not None or unfreeze_layer_end is not None:
+                start = 0 if unfreeze_layer_start is None else int(unfreeze_layer_start)
+                end = n_layers if unfreeze_layer_end is None else int(unfreeze_layer_end)
+                if start < 0:
+                    start = n_layers + start
+                if end < 0:
+                    end = n_layers + end
+                if not 0 <= start <= end <= n_layers:
+                    raise ValueError(f"Invalid unfreeze layer range: [{start}, {end}) with {n_layers} layers.")
+                target_layers = layers[start:end]
+            else:
+                n_unfreeze = min(self.unfreeze_last_n_layers, n_layers)
+                target_layers = layers[-n_unfreeze:]
+            for layer in target_layers:
+                for p in layer.parameters():
+                    p.requires_grad = True
+~~~
+
+**PS：三阶段所用数据集：**
+
+model_name="HF_20m_DNA_VQE64K_CNN03_V20260203"
+
+data_root="/mnt/zzbnew/rnamodel/model/signalDNAmodel/${model_name}/basecall"
+
+以这个为例子：大小1.1G
 
 
 
 
-# Attention（By kexuan）
+# 优化路线（By Kexuan）
 
-1. (第一阶段)tokenizer训练入口（举例）：
-```
-在南湖开发环境的终端里：
-cd poregpt\workflows\vqe_workflow\step02_train_vqe_model\try
-./run.sh
-```
-2. 改进卷积核位置：
+1. 改进卷积核位置：
 ```
 在config.yaml里的cnn_type=7
 然后根据cnn_type，在 poregpt\tokenizers\vqe_tokenizer\cnn_model.py
@@ -334,7 +441,7 @@ elif cnn_type == 12:
 
 ```
 
-3. 码本构建方式修改：
+2. 码本构建方式修改：
 ```
 poregpt\tokenizers\vqe_tokenizer\vqe_model_v1.py里的
 
@@ -358,7 +465,7 @@ self.vq = VectorQuantize(
 
 ```
 
-4. chunk相关参数：
+3. chunk相关参数：
 ```
 经过预处理策略的数据集，每个进来的chunk是12000
 

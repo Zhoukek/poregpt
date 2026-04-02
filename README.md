@@ -326,7 +326,7 @@ models/porepgt_vqe_tokenizer.step160000.pth
 ~~~
 
 问题：
-1. 一阶段训练完怎么做衔接到二阶段的训练？
+1. 一阶段的step02_train_vqe_model训练完怎么做衔接到二阶段的训练？
 
 2. 基座模型训练所需的数据集是在哪里？
 

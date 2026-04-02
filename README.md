@@ -246,33 +246,98 @@ Size in bytes: 409278582
 
 ![Markdown Logo](./assets/pipline.png)
 
+## 按仓库划分：
+1. 第一阶段tokenizer训练：https://github.com/Zhoukek/poregpt/tree/team-dev
+
+2. 第二阶段基座模型训练：https://github.com/Zhoukek/OLMo#
+
+3. 第三阶段basecall训练：https://github.com/Zhoukek/dcbasecaller/tree/team-dev
+
+
 
 ## 1. (第一阶段)tokenizer训练入口（举例，已调整完毕）：
+
+(1) **训练tokenizer**：
 ```
 在南湖开发环境的终端里：
 cd poregpt\workflows\vqe_workflow\step02_train_vqe_model\try
 
 ./run.sh
-```
 
-**PS：一阶段所用数据集：**
+PS：一阶段所用数据集：
 
 (小，快速验证)：/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/trank
 
 (大，完整数据集-焦老师预处理策略)：/mnt/si003067jezr/default/poregpt/dataset/human_dna_595g/memap_mongoq30/trank
 
 (大，完整数据集-huada预处理策略)：/mnt/si003067jezr/default/poregpt/dataset/human_dna_595g/memap_stoneq0
+```
+
+训练完成会出现：
+```
+models/porepgt_vqe_tokenizer.step160000.pth
+├── metadata.json
+├── model.safetensors
+├── optimizer.bin
+├── random_states_0.pkl
+└── scheduler.bin
+```
+
+(2) **利用训好的tokenizer模型对数据进行token化**：
+
+利用 /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/vqe_workflow/step05_tokenize_trankdir/step03_tokenize_trankdir_w64_dna032g_vqe101s106000.sh：
+~~~
+输入: /mnt/.../memap_lemon5/*.npy -> [VQ Tokenizer] (CNN编码器，词汇表大小32k或64k) -> 输出: /mnt/.../jsonlgz_vqe92s160000/相对路径.jsonl.gz
+~~~
+
+(3) **使用step06_split_jsonlgz(为什么要做这一步？)**
+
+利用 /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/vqe_workflow/step06_split_jsonlgz/step04_split_dna032g_jsonlgz_vqe101s106000.sh：
+
+~~~
+处理前：
+/mnt/.../jsonlgz_vqe101s106000/
+├── test/*.jsonlgz
+├── train/*.jsonlgz
+└── validation/*.jsonlgz
+
+处理后：
+/mnt/.../jsonlgz_vqe101s106000_split1280_overlap1024/
+├── test/*.jsonlgz (每个原文件被切成多个重叠片段)
+├── train/*
+└── validation/*
+~~~
+
+(4) **使用step07_tokenize_basecall_corpus(为什么要做这一步？)**
+
+利用 /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/vqe_workflow/step07_tokenize_basecall_corpus/run_batch.sh
+
+
+
+
 
 ## 2. (第二阶段)基座模型的训练
 
 ~~~
-训练入口：/mnt/nas_syy/default/poregpt
+训练采用的是OLMo框架
 
-二阶段存储的盘nas_syy还未分配到邹老师的南湖账号上
-
-后续看是否可以拿到这个盘，以及上面的代码
+训练入口：/mnt/zzbnew/rnamodel/zhoukexuan/OLMo/run.sh
 
 ~~~
+
+问题：
+1. 一阶段训练完怎么做衔接到二阶段的训练？
+
+2. 基座模型训练所需的数据集是在哪里？
+
+3. 训练完后是不是运行/mnt/zzbnew/rnamodel/zhoukexuan/OLMo/run_olmo_to_hf.sh，把olmo2转换成hf文件格式？
+
+
+---
+二阶段训练完后会构成：
+
+![Markdown Logo](./assets/struct.png)
+
 
 ## 3. (第三阶段)基模出来的特征做basecall训练
 

@@ -2,12 +2,16 @@
 
 # --- Configuration Section ---
 # Modify these variables according to your setup
+source /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/set_env.sh  # 你之前那个脚本
+
+export PYTHONPATH=/mnt/zzbnew/rnamodel/zhoukexuan/poregpt
+
 
 # Input directory containing .npy files
-INPUT_DIR="/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_lemon5"
+INPUT_DIR="/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/trank"
 
 # Output directory for .jsonl.gz files
-OUTPUT_DIR="/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_lemon5/jsonlgz_vqe101s106000"
+OUTPUT_DIR="/mnt/zzbnew/rnamodel/zhoukexuan/data"
 
 
 # Path to your trained VQ tokenizer model checkpoint (.pth file)
@@ -19,6 +23,9 @@ MODEL_CHECKPOINT="/mnt/si003067jezr/default/poregpt/models/vqe_models/pass80_dna
 MODEL_CHECKPOINT="/mnt/si003067jezr/default/poregpt/models/vqe_models/pass81_dna32g_scratch_c64k_cnn7-lr1e4_dbsz64_gbsz2048-lc2400-lemon5-scw9/models/porepgt_vqe_tokenizer.step236000.pth"
 MODEL_CHECKPOINT="/mnt/si003067jezr/default/poregpt/models/vqe_models/pass83_dna280g_scratch_c64k_cnn8-lr1e4_dbsz56_gbsz2240-lc2400-lemon5-dcw9/models/porepgt_vqe_tokenizer.step240000.pth"
 MODEL_CHECKPOINT="/mnt/si003067jezr/default/poregpt/models/vqe_models/pass101_dna595g_initcnn_c64k_cnn08_lr1e5_dbsz48_gbsz1920-lc2400-lemon5-dcw09-m3-freeze20k/models/porepgt_vqe_tokenizer.step106000.pth"
+MODEL_CHECKPOINT="/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/vqe_workflow/step02_train_vqe_model/try/models/porepgt_vqe_tokenizer.step1000.pth"
+MODEL_CHECKPOINT="/mnt/zzbnew/rnamodel/zhoukexuan/poregpt_tmp/poregpt/workflows/vqe_workflow/step02_train_vqe_model/pass142_w64_c128k_cnn07_dcw09_dna595g_lr2e5_mongoq30_m4_scratch_freeze01k/models/porepgt_vqe_tokenizer.step14000.pth"
+
 
 
 MODEL_TYPE=3

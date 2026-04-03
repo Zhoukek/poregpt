@@ -475,7 +475,9 @@ def vqe_train(
                 "mixed_precision": mixed_precision,
                 "global_batch_size": global_batch_size,
         },
-        init_kwargs={"wandb": {"entity": "jiaoshuaihit-hit","name":wandb_name}}
+        # init_kwargs={"wandb": {"entity": "jiaoshuaihit-hit","name":wandb_name}}
+        init_kwargs={"wandb": {"entity": "zhoukek-zhejiang-university","name":wandb_name}}
+
     )
 
     # Log accelerator info

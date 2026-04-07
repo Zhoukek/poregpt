@@ -967,6 +967,8 @@ class NanoporeCNNModel(nn.Module):
             # L1 Inverse: 64 -> 1
             nn.Conv1d(64, 1, kernel_size=5, stride=1, padding=2, bias=True)
         )
+        
+    # 来自bonito的DNA R9.4.1 卷积层
 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

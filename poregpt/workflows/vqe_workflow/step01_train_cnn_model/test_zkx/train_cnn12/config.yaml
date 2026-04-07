@@ -4,14 +4,14 @@
 # 数据相关配置
 data:
   # 输入目录：包含预处理好的 .npy 信号片段文件
-train_npy_dir: "/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/trank/train"
-# 验证数据集目录 (可选，如果 do_evaluate 为 True 则需要)
-evaluation_npy_dir: "/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/trank/validation"
+  npy_dir: "/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/trank/train"
+  # 可选：独立验证集目录
+  val_dataset_path: "/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/trank/validation"
 
 # 训练相关配置
 training:
   # 输出模型保存路径
-  output_model_path: "models/nanopore_cnn7_lr1e5"
+  output_model_path: "models/nanopore_cnn12_lr1e5"
     
   # 训练批大小
   batch_size: 512
@@ -30,7 +30,7 @@ training:
   # 检查点保存路径
   checkpoint_path: ""
   # CNN 类型
-  cnn_type: 7
+  cnn_type: 12
   # prefetch_factor (不在 shell 脚本中，使用默认值)
   prefetch_factor: 32
 
@@ -43,7 +43,7 @@ logging:
   # wandb 项目名
   wandb_project: "train_cnn" # 代码中默认值
   # wandb 运行名
-  wandb_name: "human_dna_595g_cnn7_lr1e5"
+  wandb_name: "human_dna_032g_cnn12_lr1e5"
 
 # 学习率调度器相关配置
 scheduler:

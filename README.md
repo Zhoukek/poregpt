@@ -290,7 +290,9 @@ models/porepgt_vqe_tokenizer.step160000.pth
 输入: /mnt/.../memap_lemon5/*.npy -> [VQ Tokenizer] (CNN编码器，词汇表大小32k或64k) -> 输出: /mnt/.../jsonlgz_vqe92s160000/相对路径.jsonl.gz
 ~~~
 
-(3) **使用step06_split_jsonlgz(为什么要做这一步？)**
+- 输入 *.npy -> .jsonl.gz
+
+(3) **使用step06_split_jsonlgz**
 
 利用 /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/vqe_workflow/step06_split_jsonlgz/step04_split_dna032g_jsonlgz_vqe101s106000.sh：
 
@@ -308,11 +310,13 @@ models/porepgt_vqe_tokenizer.step160000.pth
 └── validation/*
 ~~~
 
-(4) **使用step07_tokenize_basecall_corpus(为什么要做这一步？)**
+- 输入 jsonlgz_vqe101s106000/ -> vqe101s106000_split1280_overlap1024/
+
+(4) **使用step07_tokenize_basecall_corpus**
 
 利用 /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/vqe_workflow/step07_tokenize_basecall_corpus/run_batch.sh
 
-
+读取的数据是fast5的数据（不是之前预处理策略后的数据）, 以及对应的csv文件
 
 
 
@@ -324,6 +328,11 @@ models/porepgt_vqe_tokenizer.step160000.pth
 训练入口：/mnt/zzbnew/rnamodel/zhoukexuan/OLMo/run.sh
 
 ~~~
+
+需要的是，获得训练数据的：
+
+![Markdown Logo](./assets/tokens.png)
+
 
 问题：
 1. 一阶段的step02_train_vqe_model训练完怎么做衔接到二阶段的训练？

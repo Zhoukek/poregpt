@@ -24,6 +24,8 @@ from typing import List
 
 import numpy as np
 from typing import List
+import pyccf5 as slow5
+
 
 from accelerate import Accelerator
 # Import your model definition (must define NanoporeVQModel)
@@ -37,6 +39,9 @@ from .vqe_model_v3 import NanoporeVQEModel_V3
 # from .vqe_model_v8 import NanoporeVQEModel_V8
 # from .vqe_model_v9 import NanoporeVQEModel_V9
 # from .vqe_model_v10 import NanoporeVQEModel_V10
+# from .vqe_model_v11 import NanoporeVQEModel_V11
+# from .vqe_model_v12 import NanoporeVQEModel_V12
+from .vqe_model_v25 import NanoporeVQEModel_V25
 import torch.nn.functional as F
 
 
@@ -70,41 +75,59 @@ def load_accelerate_checkpoint(model_ckpt_dir: str):
             else:
                 raise FileNotFoundError(f"No model weights file found in {model_ckpt_dir}")
 
-    # 查找metadata.json文件并读取cnn_type
-    metadata_path = None
-    for f in os.listdir(model_ckpt_dir):
-        if f.endswith('metadata.json'):
-            metadata_path = os.path.join(model_ckpt_dir, f)
-            break
-
     cnn_type = 0
-    if metadata_path and os.path.exists(metadata_path):
-        try:
-            with open(metadata_path, 'r') as meta_f:
-                metadata = json.load(meta_f)
-                cnn_type = metadata.get('cnn_type', 0)
-        except:
-            cnn_type = 0
-
     model_type = 0
-    if metadata_path and os.path.exists(metadata_path):
-        try:
-            with open(metadata_path, 'r') as meta_f:
-                metadata = json.load(meta_f)
-                model_type = metadata.get('model_type', 0)
-        except:
-            model_type = 0
-
     codebook_size = 0
-    if metadata_path and os.path.exists(metadata_path):
-        try:
-            with open(metadata_path, 'r') as meta_f:
-                metadata = json.load(meta_f)
-                codebook_size = metadata.get('codebook_size', 0)
-        except:
-            codebook_size = 0
+    codebook_dim = 0
+    metadata_path = os.path.join(model_ckpt_dir, "metadata.json")
+    # 检查文件是否存在
+    if not os.path.exists(metadata_path):
+        raise FileNotFoundError(f"metadata.json not found in {model_ckpt_dir}")
 
-    return {'model_state_dict': state_dict, 'cnn_type': cnn_type,'model_type':model_type,"codebook_size":codebook_size}
+    # 尝试加载 JSON
+    try:
+        with open(metadata_path, 'r') as meta_f:
+            metadata = json.load(meta_f)
+    except (IOError, OSError, json.JSONDecodeError) as e:
+        raise ValueError(f"Failed to read or parse metadata.json in {model_ckpt_dir}: {e}")
+
+    # 定义必需字段
+    required_keys = ['cnn_type', 'model_type', 'codebook_size', 'codebook_dim']
+    missing_keys = [key for key in required_keys if key not in metadata]
+
+    if missing_keys:
+        raise KeyError(f"Missing required keys in metadata.json: {missing_keys}. Full path: {metadata_path}")
+
+    # 安全提取必需字段（其实已确保存在，但保留 .get 可加类型检查）
+    cnn_type = metadata['cnn_type']
+    model_type = metadata['model_type']
+    codebook_size = metadata['codebook_size']
+    codebook_dim = metadata['codebook_dim']
+    codebook_nqtz = metadata['codebook_nqtz']
+
+    # 5. 如果 model_type == 12，额外检查 FSQ 字段（逐个判断）
+    if model_type == 12:
+        if 'codebook_fsqd' not in metadata:
+            raise KeyError(
+                f"When model_type == 12, 'codebook_fsqd' is required but missing in metadata.json. "
+                f"Path: {metadata_path}"
+            )
+        if 'codebook_fsqn' not in metadata:
+            raise KeyError(
+                f"When model_type == 12, 'codebook_fsqn' is required but missing in metadata.json. "
+                f"Path: {metadata_path}"
+            )
+        codebook_fsqd = metadata['codebook_fsqd']
+        codebook_fsqn = metadata['codebook_fsqn']
+    else:
+        # 非 12 时，可选字段用默认值
+        codebook_fsqd = metadata.get('codebook_fsqd', 0)
+        codebook_fsqn = metadata.get('codebook_fsqn', 0)
+
+    return {'model_state_dict': state_dict, 'cnn_type': cnn_type,'model_type':model_type,"codebook_size":codebook_size,"codebook_dim":codebook_dim,"codebook_nqtz":codebook_nqtz,"codebook_fsqd":codebook_fsqd,"codebook_fsqn":codebook_fsqn}
+
+
+
 class VQETokenizer:
     """
     Nanopore Single-Layer VQ Tokenizer.
@@ -163,6 +186,22 @@ class VQETokenizer:
         else:
             codebook_size = ckpt_data['codebook_size']
 
+        if 'codebook_dim' not in ckpt_data:
+            print("Checkpoint does not contain 'codebook_size'. forced to 0")
+            codebook_dim = 0
+            raise RuntimeError(f"Unexpected codebook dim: {codebook_dim}")
+        else:
+            codebook_dim = ckpt_data['codebook_dim']
+
+        if 'codebook_nqtz' not in ckpt_data:
+            print("Checkpoint does not contain 'codebook_nqtz'. forced to 0")
+            codebook_nqtz = 0
+            raise RuntimeError(f"Unexpected codebook nqtz: {codebook_nqtz}")
+        else:
+            codebook_nqtz = ckpt_data['codebook_nqtz']
+
+
+
         if codebook_size == 0:
             raise RuntimeError(f"Unexpected codebook size: {codebook_size}")
 
@@ -208,6 +247,16 @@ class VQETokenizer:
             self.model = NanoporeVQEModel_V9(codebook_size=codebook_size,cnn_type=cnn_type)
         elif model_type == 10:
             self.model = NanoporeVQEModel_V10(codebook_size=codebook_size,cnn_type=cnn_type)
+        elif model_type == 11:
+            self.model = NanoporeVQEModel_V11(codebook_size=codebook_size,cnn_type=cnn_type)
+        elif model_type == 12:
+            codebook_fsqd = ckpt_data["codebook_fsqd"]
+            codebook_fsqn = ckpt_data["codebook_fsqn"]
+            self.model = NanoporeVQEModel_V12(codebook_size=codebook_size,codebook_nqtz=codebook_nqtz,fsq_level_d=codebook_fsqd,fsq_level_n=codebook_fsqn,cnn_type=cnn_type)
+        elif model_type == 13:
+            self.model = NanoporeVQEModel_V13(codebook_size=codebook_size,cnn_type=cnn_type)
+        elif model_type == 25:
+            self.model = NanoporeVQEModel_V25(codebook_size=codebook_size,cnn_type=cnn_type)
         else:
             raise RuntimeError(f"Unexpected model type: {model_type}")
         
@@ -245,27 +294,41 @@ class VQETokenizer:
         print("-" * 60)
     
 
-    def _tokenize_chunked_signal(self, signal: np.ndarray) -> np.ndarray:
-        """Tokenize 1D signal using sliding window with margin."""
+    def _tokenize_chunked_signal(self, signal: np.ndarray, layer: int = 0) -> np.ndarray:
+        """
+        Tokenize 1D signal using sliding window with margin.
+        
+        Args:
+            signal (np.ndarray): 1D raw signal array.
+            layer (int): Number of quantizer layers to use for tokenization.
+                         - 0: use all layers (default)
+                         - 1: use first layer only
+                         - 2: use first two layers, etc.
+
+        Returns:
+            np.ndarray: Token ID sequence of shape [T_expected], dtype=np.int64
+        """
         if signal.ndim != 1:
             raise ValueError("Signal must be 1D.")
         L = len(signal)
-        if L < self.model_RF:
-            return np.array([], dtype=np.int64)
-
-        if L == 0:
+        if L < self.model_RF or L == 0:
             return np.array([], dtype=np.int64)
 
         T_expected = (L + self.downsample_rate - 1) // self.downsample_rate
+
+        # Safely access the underlying model (handle DDP)
+        raw_model = self.model.module if hasattr(self.model, 'module') else self.model
 
         if L <= self.chunk_size:
             padded = np.pad(signal, (0, self.chunk_size - L), mode='constant')
             x = torch.from_numpy(padded).float().unsqueeze(0).unsqueeze(0).to(self.device)
             with torch.no_grad():
-                recon,level_tokens,loss,tokens = self.model(x)  # returns [B, T] or [B, T, 1] → squeeze to [T]
-            tokens = tokens.squeeze(0).cpu().numpy()
-            if tokens.ndim == 2:
-                tokens = tokens[:, 0]  # take first (and only) layer
+                outputs = self.model(x)
+                # Assume: (recon, level_indices, loss, ...)
+                level_indices = outputs[1]  # [B, N, K]
+
+            tokens_tensor = raw_model.tokenize_indices(level_indices, layer=layer)
+            tokens = tokens_tensor[0].cpu().numpy().astype(np.int64)  # [T]
             return tokens[:T_expected].astype(np.int64)
 
         # Long signal: sliding window
@@ -285,11 +348,13 @@ class VQETokenizer:
                 chunk = np.pad(chunk, (0, self.chunk_size - len(chunk)), mode='constant')
             x = torch.from_numpy(chunk).float().unsqueeze(0).unsqueeze(0).to(self.device)
             with torch.no_grad():
-                recon,level_tokens,loss,tokens = self.model(x)
-            tokens = tokens.squeeze(0).cpu().numpy()
-            if tokens.ndim == 2:
-                tokens = tokens[:, 0]
+                outputs = self.model(x)
+                level_indices = outputs[1]  # [B, N, K]
+
+            tokens_tensor = raw_model.tokenize_indices(level_indices, layer=layer)
+            tokens = tokens_tensor[0].cpu().numpy().astype(np.int64)  # [T]
             T_valid = (real_len + self.downsample_rate - 1) // self.downsample_rate
+
             kept_tokens = np.array([], dtype=np.int64)
             if chunk_index == 0:
                 end_idx = T_valid - self.margin_stride_count if self.margin_stride_count > 0 else T_valid
@@ -346,6 +411,7 @@ class VQETokenizer:
             List[np.ndarray]: 一维列表。每个元素是单个块的推理结果 (tokens)。
                              (注意：不再是二维列表，所有批次的数据都被合并到了同一个列表中)
         """
+        raw_model = self.model.module if hasattr(self.model, 'module') else self.model
     
         if signal.ndim != 1:
             raise ValueError("Signal must be 1D.")
@@ -380,26 +446,36 @@ class VQETokenizer:
             # --- 核心推理代码 ---
             batch_np = np.array(batch_chunks)
             x = torch.from_numpy(batch_np).float().unsqueeze(1).to(self.device)
-            
             with torch.no_grad():
-                recon, level_tokens, loss, tokens = self.model(x) 
+                # 模型推理，得到重构信号、层级索引等
+                # level_indices 的形状是 [批次大小(Batch_Size), 序列长度(N), 层数(K)]
+                recon, level_indices, _, _ = self.model(x) 
             
-            tokens_np = tokens.cpu().numpy()
-            if tokens_np.ndim == 3:
-                tokens_np = tokens_np.squeeze(-1) # [B, T, 1] -> [B, T]
+
+            # 使用模型的 tokenize_indices 方法将层级索引转换为单一的token ID序列
+            # 返回的 tokens_tensor 形状是 [批次大小(Batch_Size), 序列长度(N)]
+            tokens_tensor = raw_model.tokenize_indices(level_indices, layer=layer)
             
-            # --- 修改点：使用 extend ---
-            # 将当前批次中每一个块的 tokens 结果直接添加到主列表中
-            # 这样做会“展平”批次结构，最终得到一个包含所有块结果的一维列表
-            batched_results.extend(tokens_np)
-            # -------------------------
+            # 将整个批次的 tokens 张量转换为 numpy 数组
+            # tokens_np_batch 的形状是 [批次大小(Batch_Size), 序列长度(N)]
+            tokens_np_batch = tokens_tensor.cpu().numpy().astype(np.int64)  
+           
+            # --- 修改点：使用 extend 将批次结果添加到总列表 ---
+            # tokens_np_batch 是一个二维数组，形状为 [Batch_Size, N]
+            # extend() 函数会遍历这个二维数组的第一个维度（也就是批次维度）
+            # 将 tokens_np_batch[0] (第一个块的tokens, 形状[N]),
+            #   tokens_np_batch[1] (第二个块的tokens, 形状[N]),
+            #   ... 依次添加到 batched_results 列表中
+            # 这样，一个批次内的 Batch_Size 个块的 tokens 都会被添加进列表，
+            # 而不是只添加第一个块的 tokens。
+            batched_results.extend(tokens_np_batch) 
             
         return batched_results # 返回 List[np.ndarray] (一维)
 
 
     # tokenize_data不支持任何归一化, medf, lpf等操作
-    def tokenize_data(self, signal: np.ndarray) -> list:
-        flat_tokens = self._tokenize_chunked_signal(signal)
+    def tokenize_data(self, signal: np.ndarray,layer: int = 0) -> list:
+        flat_tokens = self._tokenize_chunked_signal(signal,layer)
         if flat_tokens.size == 0:
             return []
         parts = []
@@ -680,3 +756,31 @@ class VQETokenizer:
         """
         ids = re.findall(r"<\|bwav:(\d+)\|>", text)
         return np.asarray([int(x) for x in ids], dtype=np.int64)
+
+
+    def tokenize_ccf5(self, ccf5_path: str, output_path:str,nanopore_signal_process_strategy="apple"):
+        print(f"✅ Process {ccf5_path}")
+        """内部方法：处理单个 FAST5 → JSONL.GZ"""
+        results = []
+        s5 = slow5.Open(ccf5_path, 'r', DEBUG=0)
+        all_read_ids = s5.get_read_ids()[0]
+        reads = s5.get_read_list_multi(all_read_ids, threads=1, batchsize=1, aux='all')
+        for read in reads:
+            query_name = read['read_id']
+            if "lvdsmid" in read:
+                signal = (read['signal'] - read['lvdsmid']) * read['unit']
+            else:
+                signal = read['K'] * read['scale'] * (read["signal"].astype(np.uint16) + read['offset']) + read['B']
+
+            signal_processed = nanopore_process_signal(signal,nanopore_signal_process_strategy)
+            token_str = self.tokenize_data(signal_processed)
+            results.append({
+                "id": query_name,
+                "text": token_str
+            })
+        s5.close()
+        # Save
+        with gzip.open(output_path, 'wt', encoding='utf-8') as f:
+            for item in results:
+                f.write(json.dumps(item) + '\n')
+        print(f"✅ Wrote {len(results)} reads to {output_path}")

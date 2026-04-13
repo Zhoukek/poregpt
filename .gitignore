@@ -100,3 +100,5 @@ demo.*
 
 # 也不忽略 workflows 目录下所有的 .sh 文件 (递归)
 !/workflows/**/*.sh
+
+dorado_models/

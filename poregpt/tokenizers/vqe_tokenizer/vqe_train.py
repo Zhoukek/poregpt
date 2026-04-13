@@ -35,6 +35,7 @@ from .vqe_model_v3 import NanoporeVQEModel_V3
 # from .vqe_model_v8 import NanoporeVQEModel_V8
 # from .vqe_model_v9 import NanoporeVQEModel_V9
 # from .vqe_model_v10 import NanoporeVQEModel_V10
+from .vqe_model_v25 import NanoporeVQEModel_V25
 from accelerate import InitProcessGroupKwargs
 from datetime import timedelta
 
@@ -572,6 +573,11 @@ def vqe_train(
             token_counts_gpu_1 = torch.zeros(codebook_size, device=accelerator.device)
             token_counts_gpu_2 = torch.zeros(codebook_size, device=accelerator.device)
             token_counts_gpu_3 = torch.zeros(codebook_size, device=accelerator.device)
+        elif model_type in [25]: 
+            token_counts_gpu_0 = torch.zeros(codebook_size, device=accelerator.device)
+            token_counts_gpu_1 = None # 该模型类型无第二层
+            token_counts_gpu_2 = None # <-- 新增
+            token_counts_gpu_3 = None # <-- 新增
         else:
             raise ValueError(f"Unknown model_type: {model_type}")
 
@@ -678,6 +684,16 @@ def vqe_train(
                     valid_flat_indices_3 = layer_3_indices[valid_mask_3]
                     if valid_flat_indices_3.numel() > 0:
                         token_counts_gpu_3.scatter_add_(0, valid_flat_indices_3,torch.ones_like(valid_flat_indices_3, dtype=torch.float))
+                elif model_type in [25]:
+                    recon, indices, _, loss_breakdown, distill_loss = model(x)
+                    recon_loss = F.mse_loss(recon, x) # 计算重建损失
+                    local_recon_loss += recon_loss.item()
+                    local_comit_loss += loss_breakdown.commitment.item() # 累加承诺损失
+
+                    # 将多维indices展平为一维，统计所有token
+                    flat_indices = indices.flatten()
+                    # 使用scatter_add_原地更新计数张量，高效且内存友好
+                    token_counts_gpu_0.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float))
 
                 num_batches += 1
 
@@ -705,6 +721,12 @@ def vqe_train(
             global_counts_1 = global_counts_tensor_1.cpu().numpy()
             global_counts_2 = global_counts_tensor_2.cpu().numpy() # <-- 新增
             global_counts_3 = global_counts_tensor_3.cpu().numpy() # <-- 新增
+        elif model_type in [25]:
+            global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
+            global_counts_0 = global_counts_tensor_0.cpu().numpy() # 转换回CPU numpy数组以便计算
+            global_counts_1 = None
+            global_counts_2 = None
+            global_counts_3 = None
         else:
             # Should not reach here due to earlier check
             global_counts_0 = global_counts_1 = global_counts_2 = global_counts_3 = None
@@ -950,6 +972,20 @@ def vqe_train(
         )
     elif model_type == 10:
         model = NanoporeVQEModel_V10(
+            codebook_size=codebook_size,
+            codebook_decay=codebook_decay,
+            codebook_emadc=codebook_emadc,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            cnn_type=cnn_type,
+            init_codebook_path=init_codebook_path,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+            learnable_codebook=learnable_codebook,
+        )
+    elif model_type == 25:
+        model = NanoporeVQEModel_V25(
             codebook_size=codebook_size,
             codebook_decay=codebook_decay,
             codebook_emadc=codebook_emadc,
@@ -1231,6 +1267,7 @@ def vqe_train(
                     comit_loss = loss_breakdown.commitment
                     diver_loss = loss_breakdown.codebook_diversity
                     ortho_loss = loss_breakdown.orthogonal_reg
+                    total_loss = recon_loss + comit_loss * dynamic_commitment_weight
                 elif model_type in [4,5,6,7,9,10]:
                     recon, indices, all_loss, all_codes = model(x)
                     recon_loss = F.mse_loss(recon, x)
@@ -1243,9 +1280,17 @@ def vqe_train(
                     comit_loss = torch.tensor(0.0)
                     diver_loss = torch.tensor(0.0)
                     ortho_loss = torch.tensor(0.0)
+                elif model_type in [25]:
+                    recon, indices, break_loss, loss_breakdown, distill_loss = model(x)
+                    recon_loss = F.mse_loss(recon, x)
+                    comit_loss = loss_breakdown.commitment
+                    diver_loss = loss_breakdown.codebook_diversity
+                    ortho_loss = loss_breakdown.orthogonal_reg
+                    total_loss = recon_loss + comit_loss * dynamic_commitment_weight + distill_loss * 0.5
+
 
                 # 💡 ACTUAL LOSS: Fixed weights. DWA is NOT applied here.
-                total_loss = recon_loss + comit_loss * dynamic_commitment_weight
+                # total_loss = recon_loss + comit_loss * dynamic_commitment_weight
 
                 # Scale the loss by the number of accumulation steps for averaging
                 # Accelerate's backward function handles gradient scaling for mixed precision automatically
@@ -1278,6 +1323,7 @@ def vqe_train(
                 g_ortho = ortho_loss.item()
                 g_diver = diver_loss.item()
                 g_total = total_loss.item()
+                g_distill = distill_loss.item() if model_type == 25 else 0.0
 
                 # Log metrics (main process only)
                 if accelerator.is_main_process:
@@ -1323,6 +1369,7 @@ def vqe_train(
                         "train/ortho_loss": g_ortho,
                         "train/diver_loss": g_diver,
                         "train/total_loss": g_total,
+                        "train/distill_loss": g_distill,
                         "comit/dynamic_commit_weight": dynamic_commitment_weight,
                         "comit/expected_commit_weight": expected_commitment_weight,
                         "train/recon_per_comit": g_recon_per_comit,

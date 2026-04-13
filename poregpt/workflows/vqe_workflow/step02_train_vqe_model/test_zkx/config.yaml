@@ -32,7 +32,7 @@ evaluate_every_spoch: 500
 # 总共训练的 epoch 数
 num_epochs: 20
 
-model_type: 3
+model_type: 25
   
 # 学习率
 lr: 2.0e-05
@@ -64,7 +64,7 @@ cpu: false
 # === 模型架构与量化 ===
 # VQ-VAE 中的码本 (Codebook) 大小，决定了 token 的数量
 #codebook_size: 262144
-# codebook_size: 81920
+# codebook_size: 8192
 codebook_size: 65536
 # 90k
 # codebook_size: 92160
@@ -80,8 +80,8 @@ codebook_size: 65536
 # codebook_dim: 64 # 此行是代码内部变量，已从配置中移除
 # 输入信号序列的长度 (每个样本的信号点数)
 chunk_size: 12000
-# 编码器 CNN 的类型 (0, 1, 2 对应不同的网络结构)
-cnn_type: 7
+# 编码器 CNN 的类型 (0, 1, 2 对应不同的网络结构)o
+cnn_type: 13
 # 是否使码本嵌入向量可学习 (true: 可学习, false: 固定或仅通过 EMA 更新)
 learnable_codebook: false
 # 初始化码本的路径 (可选，用于预初始化码本，例如从 K-means 聚类结果)
@@ -90,9 +90,9 @@ init_codebook_path: ""
 # CNN 编码器的预训练模型路径 (可选，用于初始化编码器权重)
 cnn_checkpoint_path: "/mnt/nas_syy/default/poregpt/shared/cnn_models_lemon_type1/checkpoints/nanopore_signal_tokenizer.pth.epoch28.pth"
 cnn_checkpoint_path: "/mnt/si003067jezr/default/poregpt/poregpt/poregpt/workflows/vqe_workflow/step01_train_cnn_model/human_dna_595g_memap_lemon5/train_cnn7/models/nanopore_cnn7_lr1e5.epoch100.pth"
-# cnn_checkpoint_path: ""
+cnn_checkpoint_path: ""
 # 是否冻结 CNN 编码器权重 (0: 不冻结, 1: 冻结)
-freeze_cnn: 1
+freeze_cnn: 0
 
 # === 损失函数权重 ===
 # VQ-VAE 中承诺损失 (Commitment Loss) 的权重
@@ -145,4 +145,5 @@ use_wandb: true
 # WandB 项目名称
 wandb_project: "train_vqe_dna04g"
 # 当前运行的实验名称
-wandb_name: "test-zhoukexuan"
+# wandb_name: "test-zhoukexuan-model-type25-cnn_type2-teacher_model"
+wandb_name: "test-zhoukexuan-model-type25-cnn_type13-baseline"

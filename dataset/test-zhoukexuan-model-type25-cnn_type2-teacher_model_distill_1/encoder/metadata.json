@@ -1,0 +1,1 @@
+{"epoch": 17, "spoch": 0, "global_step": 25000, "cnn_type": 13, "model_type": 25, "dynamic_commitment_weight": 9.0, "codebook_size": 65536, "codebook_dim": 768, "codebook_nqtz":2}

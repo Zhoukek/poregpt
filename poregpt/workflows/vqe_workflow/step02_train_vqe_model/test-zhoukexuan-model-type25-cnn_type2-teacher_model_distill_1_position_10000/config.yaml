@@ -21,7 +21,7 @@ loss_csv_path: "train_loss.csv"
 #checkpoint_path: "/mnt/si003067jezr/default/poregpt/poregpt/poregpt/workflows/vqe_workflow/step02_train_vqe_model/pass109_w64_c256k_cnn08_dcw0q_dna595g_lr2e5_lemon5_m2_initcnn_freeze40k/models/porepgt_vqe_tokenizer.step15000.pth"
 # 训练多少个 spoch 后保存一次模型检查点
 # Spoch 是指每 update_loss_weight_every 次迭代后的一个周期单位
-save_checkpoint_every_spoch: 1000
+save_checkpoint_every_spoch: 5000
 # 每隔多少个训练步骤（micro-step）打印一次训练日志
 # 注意：实际的日志记录频率可能受 accelerator.accumulate 影响
 loss_log_interval: 10
@@ -30,9 +30,9 @@ evaluate_every_spoch: 500
 
 # === 训练超参数 ===
 # 总共训练的 epoch 数
-num_epochs: 10
+num_epochs: 20
 
-model_type: 3
+model_type: 25
   
 # 学习率
 lr: 2.0e-05
@@ -64,7 +64,7 @@ cpu: false
 # === 模型架构与量化 ===
 # VQ-VAE 中的码本 (Codebook) 大小，决定了 token 的数量
 #codebook_size: 262144
-# codebook_size: 81920
+# codebook_size: 8192
 codebook_size: 65536
 # 90k
 # codebook_size: 92160
@@ -80,8 +80,8 @@ codebook_size: 65536
 # codebook_dim: 64 # 此行是代码内部变量，已从配置中移除
 # 输入信号序列的长度 (每个样本的信号点数)
 chunk_size: 12000
-# 编码器 CNN 的类型 (0, 1, 2 对应不同的网络结构)
-cnn_type: 7
+# 编码器 CNN 的类型 (0, 1, 2 对应不同的网络结构)o
+cnn_type: 13
 # 是否使码本嵌入向量可学习 (true: 可学习, false: 固定或仅通过 EMA 更新)
 learnable_codebook: false
 # 初始化码本的路径 (可选，用于预初始化码本，例如从 K-means 聚类结果)
@@ -145,4 +145,4 @@ use_wandb: true
 # WandB 项目名称
 wandb_project: "train_vqe_dna04g"
 # 当前运行的实验名称
-wandb_name: "test-zhoukexuan"
+wandb_name: "test-zhoukexuan-model-type25-cnn_type13-teacher_model_distill_1_position_10000"

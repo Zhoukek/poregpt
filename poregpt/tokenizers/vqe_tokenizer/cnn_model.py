@@ -219,7 +219,7 @@ class NanoporeCNNModel(nn.Module):
     def __init__(self, cnn_type: Literal[0, 1, 2,3,4,5,6,7,8,9,10,11,12] = 1) -> None:
         super().__init__()
 
-        if cnn_type not in (0, 1, 2,3,4,5,6,7,8,9,10,11,12):
+        if cnn_type not in (0, 1, 2,3,4,5,6,7,8,9,10,11,12,13):
             raise ValueError(f"`cnn_type` must be 0, 1 or 2,3,4,5 got {cnn_type}.")
 
         self.cnn_type: int = cnn_type
@@ -301,6 +301,12 @@ class NanoporeCNNModel(nn.Module):
             self.stride = 4
             self.receptive_field = 49
             self.RF = 49
+        elif cnn_type == 13:
+            self._build_cnn_type13()
+            self.out_channels = 768
+            self.stride = 5
+            self.receptive_field = 27
+            self.RF = 27
 
 
 
@@ -970,6 +976,41 @@ class NanoporeCNNModel(nn.Module):
         
     # 来自bonito的DNA R9.4.1 卷积层
 
+    def _build_cnn_type13(self) -> None:
+        self.encoder = nn.Sequential(
+            # Layer 1: 1 → 4, 第一个通道(kernel_size=5区域内的均值)，其余7个通道来自标准卷积
+            # Conv1dWithMeanChannel(out_channels=4, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.Conv1d(1, 4, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.SiLU(),
+
+            # Layer 2: 4 → 16
+            nn.Conv1d(4, 16, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.SiLU(),
+
+            # Layer 3: 16 → 768, stride=5, RF=33
+            nn.Conv1d(16, 768, kernel_size=19, stride=5, padding=9, bias=False),
+        )
+        """构建 cnn_type=1 的 decoder（严格对称：16 → 8 → 4 → 1）"""
+        self.decoder = nn.Sequential(
+            # Inverse of encoder Layer 3: 768 → 16
+            nn.ConvTranspose1d(
+                in_channels=768,
+                out_channels=16,
+                kernel_size=19,
+                stride=5,
+                padding=9,
+                output_padding=1,
+                bias=False,
+            ),
+            nn.SiLU(),
+
+            # Inverse of encoder Layer 2: 16 → 4
+            nn.Conv1d(16, 4, kernel_size=5, padding=2, bias=False),
+            nn.SiLU(),
+            
+            # Inverse of encoder Layer 1: 4 → 1
+            nn.Conv1d(4, 1, kernel_size=5, padding=2, bias=True)
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """前向传播"""

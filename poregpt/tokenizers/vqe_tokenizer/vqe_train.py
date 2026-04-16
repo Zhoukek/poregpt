@@ -1286,7 +1286,7 @@ def vqe_train(
                     comit_loss = loss_breakdown.commitment
                     diver_loss = loss_breakdown.codebook_diversity
                     ortho_loss = loss_breakdown.orthogonal_reg
-                    total_loss = recon_loss + comit_loss * dynamic_commitment_weight + distill_loss * 0.5
+                    total_loss = recon_loss + comit_loss * dynamic_commitment_weight + distill_loss * 1.0
 
 
                 # 💡 ACTUAL LOSS: Fixed weights. DWA is NOT applied here.

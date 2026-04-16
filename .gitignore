@@ -102,3 +102,5 @@ demo.*
 !/workflows/**/*.sh
 
 dorado_models/
+*.pkl
+*.safetensors

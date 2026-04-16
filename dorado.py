@@ -14,49 +14,33 @@ model.eval()
 print("模型加载成功！网络结构如下：")
 print(model)
 
-# import triton
-# triton.runtime.autotuner.DEFAULT_NUM_WARPS = 8
+# 1. 模拟输入数据
+# 纳米孔信号通常是 1 维的连续电流值
+# 假设我们模拟 2000 个采样点的信号
+# batch_size=1, channels=1, length=2000
+batch_size = 1
+channels = 1
+signal_length = 2000 
+dummy_input = torch.randn(batch_size, channels, signal_length).to(device)
+model.float()
 
-# import os
-# # 彻底禁用所有 Flash Attention + Triton 加速（关键修复）
-# os.environ["FLASH_ATTENTION_FORCE_DISABLE"] = "1"
-# os.environ["FLASH_ATTENTION_SKIP_TRITON"] = "1"
-# os.environ["FLASH_ATTENTION_DISABLE_BACKWARD"] = "1"
-# os.environ["TRITON_DISABLE"] = "1"          # 新增：禁用Triton
-# os.environ["TORCH_FLASH_ATTN_SDP_ENABLED"] = "0" # 新增：禁用PyTorch自带Flash Attention
+# 2. 推理
+with torch.no_grad():
+    # 这里的输出通常是一个命名元组或特定的张量
+    outputs = model(dummy_input)
 
-# import torch
-# from bonito.util import load_model
+# 3. 解析输出
+print("-" * 30)
+print(f"输入形状: {dummy_input.shape}") # [1, 1, 2000]
 
-# model_dir = "./dorado_models/dna_r10.4.1_e8.2_400bps_sup@v5.0.0"
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# model = load_model(model_dir, device=device)
-# model.float()  # 关键：将模型所有权重转为 Float32
-# model.eval()
+# 这种模型（基于 bonito 框架）通常返回的是 log 概率或分数
+# 形状通常为 [Time, Batch, State]
+print(f"输出形状: {outputs.shape}") 
+# 预期输出长度为 2000 / 5 = 400 左右
+# 最后一维 4096 对应 LinearCRFEncoder 的 out_features
 
-# # 存储 transformer_encoder 的输出
-# transformer_output = None
-
-# def hook_fn(module, input, output):
-#     global transformer_output
-#     transformer_output = output  # 保存输出
-    
-# # 注册 hook 到 transformer_encoder
-# hook = model.encoder.transformer_encoder.register_forward_hook(hook_fn)
-
-# # 准备输入数据（示例）
-# # 注意：需要根据你的实际输入shape调整，通常是 (batch, channels, sequence_length)
-# sample_input = torch.randn(1, 1, 5000).to(device).float() # batch=1, channels=1, seq_len=5000
-
-# # sample_input_half = sample_input.half()  # 转为半精度
-# # 前向传播
-# with torch.no_grad():
-#     output = model(sample_input)  # 这会触发 hook
-
-# # 现在 transformer_output 包含了 transformer_encoder 的输出
-# print(f"Transformer encoder output shape: {transformer_output.shape}")
-
-# # 使用完毕后移除 hook
-# hook.remove()
+# 4. 查看部分数值（发射得分）
+print("输出部分得分样例 (前 5 个时间点的局部数据):")
+print(outputs[:5, 0, :10])
 
 

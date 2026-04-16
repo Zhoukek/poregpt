@@ -278,7 +278,9 @@ class VQETokenizer:
         self.chunk_size = token_batch_size * self.downsample_rate
 
         # --- Load state dict ---
-        self.model.load_state_dict(state_dict)
+        self.model.load_state_dict(state_dict, strict=False)
+
+        print(self.model)
         self.model.eval()
         self.model.to(self.device)
 
@@ -725,7 +727,7 @@ class VQETokenizer:
 
         # 6) decode
         with torch.no_grad():
-            recon = self.model.decoder(z_q)                   # [B, 1, L]
+            recon = self.model.decode(z_q)                   # [B, 1, L]
 
         recon = recon.squeeze(1)                              # [B, L]
 

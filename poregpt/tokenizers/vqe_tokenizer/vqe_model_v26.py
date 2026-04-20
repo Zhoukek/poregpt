@@ -19,7 +19,7 @@ torch.backends.cuda.enable_mem_efficient_sdp(False)  # 禁用 memory efficient
 torch.backends.cuda.enable_math_sdp(True)  # 使用数学实现
 
 
-class NanoporeVQEModel_V25(nn.Module):
+class NanoporeVQEModel_V26(nn.Module):
     """
     Nanopore VQ Tokenizer for Direct RNA Sequencing (130 bps, 4 kHz)
 
@@ -135,20 +135,8 @@ class NanoporeVQEModel_V25(nn.Module):
 
         dim_feedforward = d_model*2
         # 线性投影层: 将 CNN 特征 (128) 映射到 Transformer 维度 (256)
-        # --- 新增：位置编码 ---
-        self.max_position = 2500  # 预设一个足够大的上限
-        self.pos_embedding = nn.Parameter(torch.zeros(1, self.max_position, d_model))
-        # 初始化（小的标准差有助于稳定训练开始阶段）
-        nn.init.trunc_normal_(self.pos_embedding, std=0.02)     
+        # --- 新增：位置编码 --- 
 
-        self.transformer_encoder = LocalTransformerEncoder(
-            d_model=d_model,
-            nhead=nhead,
-            num_layers=num_layers,
-            window_size=65,        # 1200 token 下，65 是非常合理的窗口
-            dim_feedforward=dim_feedforward,
-            dropout=dropout
-        )
 
         self.vq = VectorQuantize(
             dim=d_model,
@@ -464,7 +452,7 @@ class NanoporeVQEModel_V25(nn.Module):
         teacher_features = None
         
         # 只有在训练阶段，或者你想强制计算蒸馏指标时，才跑笨重的 Teacher
-        a = False
+        a = True
         if a:
             # 确保 teacher 和输入在同一个 device
             self.teacher_model.float()
@@ -503,18 +491,8 @@ class NanoporeVQEModel_V25(nn.Module):
         #     return_all_codes = True
         # )
 
-        seq_len = z_permuted.size(1)
-        if seq_len > self.max_position:
-            raise ValueError(f"输入序列长度 {seq_len} 超过了预设的最大位置编码长度 {self.max_position}")
-        # 将位置编码加到特征上（利用广播机制 [1, 2048, 256] -> [B, 512, 256]）
-        z_with_pos = z_permuted + self.pos_embedding[:, :seq_len, :]
-        # -------------------------
-        # 修改输入，使用带位置信息的 z_with_pos
-        z_transformed = self.transformer_encoder(z_with_pos)
-
-
         z_quantized_permuted, indices, loss, loss_breakdown = self.vq(
-            z_transformed, # 输入连续特征
+            z_permuted, # 输入连续特征
             return_loss_breakdown=True # 返回详细的损失分项
         )
 

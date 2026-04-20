@@ -36,6 +36,7 @@ from .vqe_model_v3 import NanoporeVQEModel_V3
 # from .vqe_model_v9 import NanoporeVQEModel_V9
 # from .vqe_model_v10 import NanoporeVQEModel_V10
 from .vqe_model_v25 import NanoporeVQEModel_V25
+from .vqe_model_v26 import NanoporeVQEModel_V26
 from accelerate import InitProcessGroupKwargs
 from datetime import timedelta
 
@@ -573,7 +574,7 @@ def vqe_train(
             token_counts_gpu_1 = torch.zeros(codebook_size, device=accelerator.device)
             token_counts_gpu_2 = torch.zeros(codebook_size, device=accelerator.device)
             token_counts_gpu_3 = torch.zeros(codebook_size, device=accelerator.device)
-        elif model_type in [25]: 
+        elif model_type in [25,26]: 
             token_counts_gpu_0 = torch.zeros(codebook_size, device=accelerator.device)
             token_counts_gpu_1 = None # 该模型类型无第二层
             token_counts_gpu_2 = None # <-- 新增
@@ -684,7 +685,7 @@ def vqe_train(
                     valid_flat_indices_3 = layer_3_indices[valid_mask_3]
                     if valid_flat_indices_3.numel() > 0:
                         token_counts_gpu_3.scatter_add_(0, valid_flat_indices_3,torch.ones_like(valid_flat_indices_3, dtype=torch.float))
-                elif model_type in [25]:
+                elif model_type in [25,26]:
                     recon, indices, _, loss_breakdown, distill_loss = model(x)
                     recon_loss = F.mse_loss(recon, x) # 计算重建损失
                     local_recon_loss += recon_loss.item()
@@ -721,7 +722,7 @@ def vqe_train(
             global_counts_1 = global_counts_tensor_1.cpu().numpy()
             global_counts_2 = global_counts_tensor_2.cpu().numpy() # <-- 新增
             global_counts_3 = global_counts_tensor_3.cpu().numpy() # <-- 新增
-        elif model_type in [25]:
+        elif model_type in [25,26]:
             global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
             global_counts_0 = global_counts_tensor_0.cpu().numpy() # 转换回CPU numpy数组以便计算
             global_counts_1 = None
@@ -986,6 +987,20 @@ def vqe_train(
         )
     elif model_type == 25:
         model = NanoporeVQEModel_V25(
+            codebook_size=codebook_size,
+            codebook_decay=codebook_decay,
+            codebook_emadc=codebook_emadc,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            cnn_type=cnn_type,
+            init_codebook_path=init_codebook_path,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+            learnable_codebook=learnable_codebook,
+        )
+    elif model_type == 26:
+        model = NanoporeVQEModel_V26(
             codebook_size=codebook_size,
             codebook_decay=codebook_decay,
             codebook_emadc=codebook_emadc,
@@ -1280,7 +1295,7 @@ def vqe_train(
                     comit_loss = torch.tensor(0.0)
                     diver_loss = torch.tensor(0.0)
                     ortho_loss = torch.tensor(0.0)
-                elif model_type in [25]:
+                elif model_type in [25,26]:
                     recon, indices, break_loss, loss_breakdown, distill_loss = model(x)
                     recon_loss = F.mse_loss(recon, x)
                     comit_loss = loss_breakdown.commitment

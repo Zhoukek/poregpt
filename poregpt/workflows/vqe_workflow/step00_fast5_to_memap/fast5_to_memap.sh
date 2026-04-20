@@ -38,29 +38,29 @@ DATASET_NAME="human_min0_max2_read96655_p90"
 DATASET_NAME="human_dna_152g"
 DATASET_NAME="human_dna_280g"
 DATASET_NAME="human_dna_032g"
-DATASET_NAME="human_dna_595g"
+# DATASET_NAME="human_dna_595g"
 
 # 信号处理策略：
 # - "apple": Apple算法（通常用于去噪）
 # - "stone": Stone算法（另一种信号处理方法）
 # - "lemon": Lemon算法（新增策略）
-STRATEGY="stone"
+STRATEGY="lemon"
 # 30表示范围在-3.0到3.0之间的片段才会留存
 CLIP=0
 
 
 # 输入目录数组：包含fast5文件的目录（会递归搜索子目录）
 INPUT_DIRS=(
-    "/mnt/nas_syy/default/poregpt/dataset/${DATASET_NAME}/fast5/train"
-    "/mnt/nas_syy/default/poregpt/dataset/${DATASET_NAME}/fast5/validation"
-    "/mnt/nas_syy/default/poregpt/dataset/${DATASET_NAME}/fast5/test"
+    "/mnt/si003067jezr/default/poregpt/dataset/${DATASET_NAME}/fast5/train"
+    "/mnt/si003067jezr/default/poregpt/dataset/${DATASET_NAME}/fast5/validation"
+    "/mnt/si003067jezr/default/poregpt/dataset/${DATASET_NAME}/fast5/test"
 )
 
 # 输出目录数组：保存npy文件的目录（必须与输入目录一一对应）
 OUTPUT_DIRS=(
-    "/mnt/nas_syy/default/poregpt/dataset/${DATASET_NAME}/memap_${STRATEGY}q${CLIP}/train"
-    "/mnt/nas_syy/default/poregpt/dataset/${DATASET_NAME}/memap_${STRATEGY}q${CLIP}/validation"
-    "/mnt/nas_syy/default/poregpt/dataset/${DATASET_NAME}/memap_${STRATEGY}q${CLIP}/test"
+    "/mnt/si003067jezr/default/poregpt/dataset/${DATASET_NAME}/memap_${STRATEGY}q${CLIP}/train"
+    "/mnt/si003067jezr/default/poregpt/dataset/${DATASET_NAME}/memap_${STRATEGY}q${CLIP}/validation"
+    "/mnt/si003067jezr/default/poregpt/dataset/${DATASET_NAME}/memap_${STRATEGY}q${CLIP}/test"
 )
 # 每个信号块的大小（采样点数量）
 # 注意：此值需要与下游模型或分析工具兼容

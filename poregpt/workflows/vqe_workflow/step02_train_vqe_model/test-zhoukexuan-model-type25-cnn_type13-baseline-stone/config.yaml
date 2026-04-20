@@ -6,9 +6,9 @@
 # 训练数据集目录 (包含 .npy 文件)
 # === 数据路径 ===
 # 训练数据集目录 (包含 .npy 文件)
-train_npy_dir: "/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/trank/train"
+train_npy_dir: "/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_stoneq0/train"
 # 验证数据集目录 (可选，如果 do_evaluate 为 True 则需要)
-evaluation_npy_dir: "/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/trank/validation"
+evaluation_npy_dir: "/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_stoneq0/validation"
 
 
 # === 输出与检查点 ===
@@ -32,7 +32,7 @@ evaluate_every_spoch: 500
 # 总共训练的 epoch 数
 num_epochs: 20
 
-model_type: 25
+model_type: 26
   
 # 学习率
 lr: 2.0e-05
@@ -145,4 +145,5 @@ use_wandb: true
 # WandB 项目名称
 wandb_project: "train_vqe_dna04g"
 # 当前运行的实验名称
-wandb_name: "test-zhoukexuan-model-type25-cnn_type13-teacher_model"
+# wandb_name: "test-zhoukexuan-model-type25-cnn_type2-teacher_model"
+wandb_name: "test-zhoukexuan-model-type26-cnn_type13-baseline-stone"

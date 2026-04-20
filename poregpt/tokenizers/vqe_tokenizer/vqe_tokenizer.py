@@ -42,6 +42,7 @@ from .vqe_model_v3 import NanoporeVQEModel_V3
 # from .vqe_model_v11 import NanoporeVQEModel_V11
 # from .vqe_model_v12 import NanoporeVQEModel_V12
 from .vqe_model_v25 import NanoporeVQEModel_V25
+from .vqe_model_v26 import NanoporeVQEModel_V26
 import torch.nn.functional as F
 
 
@@ -257,6 +258,8 @@ class VQETokenizer:
             self.model = NanoporeVQEModel_V13(codebook_size=codebook_size,cnn_type=cnn_type)
         elif model_type == 25:
             self.model = NanoporeVQEModel_V25(codebook_size=codebook_size,cnn_type=cnn_type)
+        elif model_type == 26:
+            self.model = NanoporeVQEModel_V26(codebook_size=codebook_size,cnn_type=cnn_type)
         else:
             raise RuntimeError(f"Unexpected model type: {model_type}")
         

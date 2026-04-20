@@ -227,7 +227,7 @@ Size in bytes: 409278582
 
 脚本: merge_tsv_and_npy_to_bccsv.sh 就是来执行这个合并操作， 它的功能是递归遍历一个目录下的所有子目录，如果这个子目录中有out_summary.processed.tsv和references.npy，合并成一个以子目录命名的.bc.csv文件。并且用multiprocessing_pool来并行处理。
 
-# 开发环境相关（By Kexuan）
+# 之江开发环境相关
 
 1. 登录邹老师账号，选取V5000+W64集群，新建开发环境，
 
@@ -241,7 +241,7 @@ Size in bytes: 409278582
 
 3. 镜像包含了运行所需的各类代码库，在国产卡沐曦上新建conda环境会比较麻烦，直接在南湖系统上打开开发环境的终端，然后在这个终端里bash run.sh脚本
 
-# pipline（By Kexuan）
+# pipline
 
 
 ![Markdown Logo](./assets/pipline.png)
@@ -253,9 +253,27 @@ Size in bytes: 409278582
 
 3. 第三阶段basecall训练：https://github.com/Zhoukek/dcbasecaller/tree/team-dev
 
+## 项目所含实验
+
+1. [tokenizer训练](#tokenizer训练)
+2. [一阶段tokenizer重建basecall验证](#一阶段tokenizer重建basecall验证)
+3. [二阶段基模训练](#二阶段基座模型的训练)
+4. [三阶段基模隐变量做basecall训练](#项目所含实验)
 
 
-## 1. (第一阶段)tokenizer训练入口（举例，已调整完毕）：
+## 实验数据记录
+
+【腾讯文档】面向纳米孔原始电信号基因大模型实验记录表
+https://docs.qq.com/sheet/DYkJ6Q3RXR2RUam9N
+
+## 数据预处理策略
+
+运行脚本：
+```
+/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/vqe_workflow/step00_fast5_to_memap/fast5_to_memap.sh
+```
+
+## tokenizer训练：
 
 (1) **训练tokenizer**：
 ```
@@ -283,44 +301,99 @@ models/porepgt_vqe_tokenizer.step160000.pth
 └── scheduler.bin
 ```
 
-(2) **利用训好的tokenizer模型对数据进行token化**：
+## 一阶段tokenizer重建basecall验证
 
-利用 /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/vqe_workflow/step05_tokenize_trankdir/step03_tokenize_trankdir_w64_dna032g_vqe101s106000.sh：
-~~~
-输入: /mnt/.../memap_lemon5/*.npy -> [VQ Tokenizer] (CNN编码器，词汇表大小32k或64k) -> 输出: /mnt/.../jsonlgz_vqe92s160000/相对路径.jsonl.gz
-~~~
+### step1：电信号->token
+运行脚本：
+```
+/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/vqe_workflow/step07_tokenize_basecall_corpus/shj_run_batch-0415.sh
+```
 
-- 输入 *.npy -> .jsonl.gz
+代码实现内容：将原始的fast5电信号，通过一阶段训练的tokenizer转化为离散的token,生成jsonl文件
+注意！  input需要包含完整的fast5文件以及相对应的csv文件   例如validation_00001.fast5   validation_00001.bc.csv需同时存在
 
-(3) **使用step06_split_jsonlgz**
+生成的json文件数据内容格式:
+```
+<!-- # 包含的字段 (Keys): ['fast5', 'read_id', 'chunk_start', 'chunk_size', 'bases', 'text']
+#  🔹 [fast5] - 数据示例: 'validation_00001.fast5'
+#  🔹 [read_id] - 数据示例: '250F701901011_11_1026_1413_193330250_442042'
+#  🔹 [chunk_start]  - 具体值: 3000
+#  🔹 [chunk_size]  - 具体值: 6000
+#  🔹 [bases] - 数据示例: '22133134421131221322433321123413211312224142424121...'
+#  🔹 [text]   - 数据示例: '<|bwav:12817|><|bwav:6230|><|bwav:10536|><|bwav:15...' -->
+```
 
-利用 /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/vqe_workflow/step06_split_jsonlgz/step04_split_dna032g_jsonlgz_vqe101s106000.sh：
+不同实验主要修改
 
-~~~
-处理前：
-/mnt/.../jsonlgz_vqe101s106000/
-├── test/*.jsonlgz
-├── train/*.jsonlgz
-└── validation/*.jsonlgz
+```
+FAST5_DIR="/mnt/si003067jezr/default/poregpt/dataset/human_dna_037g/fast5/validation"
+OUTPUT_DIR="/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-kexuanzhou-model-type25-cnn_type13-teacher_model-strill1/basecall"
+MODEL_CKPT="/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-kexuanzhou-model-type25-cnn_type13-teacher_model-strill1/encoder"
+以上三个路径地址
+```
 
-处理后：
-/mnt/.../jsonlgz_vqe101s106000_split1280_overlap1024/
-├── test/*.jsonlgz (每个原文件被切成多个重叠片段)
-├── train/*
-└── validation/*
-~~~
+### step2：token->recon电信号
+运行脚本：
 
-- 输入 jsonlgz_vqe101s106000/ -> vqe101s106000_split1280_overlap1024/
+```
+/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/DNA_basecall/haojieshen/03.recon_signal-shj.sh
+```
+代码实现内容：将step1生成的token，通过decoder重建信号      
+生成文件：chunks.npy（电信号特征）， _references.npy（碱基序列），_reference_lengths.npy（真实长度）      
 
-(4) **使用step07_tokenize_basecall_corpus**
+不同实验修改脚本内容:
+```
+step1生成的json文件地址：
+INPUT_DIR="/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-kexuanzhou-model-type25-cnn_type13-teacher_model-strill1/basecall"
 
-利用 /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/vqe_workflow/step07_tokenize_basecall_corpus/run_batch.sh
+输出重建信号文件地址：
+OUTPUT_DIR="/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-kexuanzhou-model-type25-cnn_type13-teacher_model-strill1/recon"
 
-读取的数据是fast5的数据（不是之前预处理策略后的数据）, 以及对应的csv文件
+权重文件地址：
+MODEL_CKPT="/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-kexuanzhou-model-type25-cnn_type13-teacher_model-strill1/encoder"
+```
 
+### step3：针对step2生成的各个文件进行合并操作
+运行脚本：
+```
+/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/DNA_basecall/haojieshen/03.merge-shj.sh
+```
 
+这个脚本负责将之前步骤生成的分块文件（chunks, references, reference_lengths）合并成最终的 npy 文件，供后续分析使用。重建的各个文件在 DATA_DIR_1 目录下，最终的合并结果也会输出到同一目录。
 
-## 2. (第二阶段)基座模型的训练
+```
+DATA_DIR_1="/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-kexuanzhou-model-type25-cnn_type13-teacher_model-strill1/recon"
+CSV_PATH_1="/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-kexuanzhou-model-type25-cnn_type13-teacher_model-strill1/recon/processing_summary.csv"
+```
+
+### step4：shuffle操作
+执行脚本：
+```
+/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/DNA_basecall/haojieshen/02.shuffle-shj.sh
+```
+
+原来的代码中N是硬编码，这里改为自动获取，读取chunk.npy文件在自动获取N,
+不同实验修改内容：
+```
+INPUT_DIR="/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-kexuanzhou-model-type25-cnn_type13-teacher_model-strill1/recon"
+OUTPUT_DIR="/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-kexuanzhou-model-type25-cnn_type13-teacher_model-strill1/shuffle_npy"
+```
+
+### step5：bonito_train实验
+执行脚本：
+```
+/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/DNA_basecall/tokenize/bonito_train.sh
+```
+
+运行所需A40显卡：
+```
+ssh root@10.200.65.171
+ZJlab@123
+
+conda activate /mnt/zzbnew/rnamodel/dengjingye/tools/conda/envs/bonito090_py39
+```
+
+## 二阶段基座模型的训练
 
 ~~~
 训练采用的是OLMo框架
@@ -348,7 +421,7 @@ models/porepgt_vqe_tokenizer.step160000.pth
 ![Markdown Logo](./assets/struct.png)
 
 
-## 3. (第三阶段)基模出来的特征做basecall训练
+## 三阶段基模隐变量做basecall训练
 
 ~~~
 训练入口：/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/basecall_workflow/step00_train_ctc_bilstm_0305.sh
@@ -487,146 +560,4 @@ model_name="HF_20m_DNA_VQE64K_CNN03_V20260203"
 data_root="/mnt/zzbnew/rnamodel/model/signalDNAmodel/${model_name}/basecall"
 
 以这个为例子：大小1.1G
-
-
-
-
-# 优化路线（By Kexuan）
-
-1. 改进卷积核位置：
-```
-在config.yaml里的cnn_type=7
-然后根据cnn_type，在 poregpt\tokenizers\vqe_tokenizer\cnn_model.py
-里有不同的cnn架构
-if cnn_type == 0:
-  self._build_cnn_type0()
-  self.out_channels = 256
-  self.stride = 5
-  self.receptive_field = 33
-  self.RF = 33
-...
-
-elif cnn_type == 12:
-  self._build_cnn_type12()
-  self.out_channels = 512
-  self.stride = 4
-  self.receptive_field = 49
-  self.RF = 49
-
-```
-
-2. 码本构建方式修改：
-```
-poregpt\tokenizers\vqe_tokenizer\vqe_model_v1.py里的
-
-from vector_quantize_pytorch import VectorQuantize
-self.vq = VectorQuantize(
-            dim=self.latent_dim,
-            codebook_size=codebook_size,
-            kmeans_init=True,
-            kmeans_iters=10,
-            decay=codebook_decay,
-            threshold_ema_dead_code=codebook_emadc,
-            commitment_weight=commitment_weight,
-            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
-            orthogonal_reg_weight=orthogonal_reg_weight,
-            orthogonal_reg_max_codes=256,
-            orthogonal_reg_active_codes_only=True,
-            learnable_codebook=learnable_codebook,
-            ema_update = ema_update,
-        )
-会有不同的码本构建方式，
-
-```
-
-在/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/tokenizers/vqe_tokenizer 增加 vqe_model_vX.py
-然后在 /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/tokenizers/vqe_tokenizer/vqe_train.py和/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/tokenizers/vqe_tokenizer/vqe_tokenizer.py 的导入部分里加
-
-~~~
-from .vqe_model_vX import NanoporeVQEModel_VX
-
-增加或修改：
-
-    elif model_type == X:
-        model = NanoporeVQEModel_VX(
-            codebook_size=codebook_size,
-            codebook_decay=codebook_decay,
-            codebook_emadc=codebook_emadc,
-            commitment_weight=commitment_weight,
-            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
-            orthogonal_reg_weight=orthogonal_reg_weight,
-            cnn_type=cnn_type,
-            init_codebook_path=init_codebook_path,
-            cnn_checkpoint_path = cnn_checkpoint_path,
-            freeze_cnn = freeze_cnn,
-            learnable_codebook=learnable_codebook
-        )
-
-修改码本方法，修改下面的部分，换成其他的码本构建方法：
-
-        self.vq = VectorQuantize(
-            dim=d_model,
-            codebook_size=codebook_size,
-            kmeans_init=True,
-            kmeans_iters=10,
-            decay=codebook_decay,
-            threshold_ema_dead_code=codebook_emadc,
-            commitment_weight=commitment_weight,
-            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
-            orthogonal_reg_weight=orthogonal_reg_weight,
-            orthogonal_reg_max_codes=256,
-            orthogonal_reg_active_codes_only=True,
-            learnable_codebook=learnable_codebook,
-            ema_update = ema_update,
-        )
-
-并修改 conifg.yaml 的model_type部分
-~~~
-
-
-
-
-3. chunk相关参数：
-```
-经过预处理策略的数据集，每个进来的chunk是12000
-
-config.yaml下：
-# 输入信号序列的长度 (每个样本的信号点数)
-chunk_size: 12000
-
-会有一个下一个chunk，把12000的再切掉
-dataset_logic_chunk_size: 2400  
-
-vqe_train.py中：
-train_dataset = NanoporeSignalDataset(shards_dir=train_npy_dir,logic_chunk_size=dataset_logic_chunk_size,logic_chunk_overlap_size=100)
-还会有一个logic_chunk_overlap_size=100，算出来最后是2560
-
-vqe_model_v3.py中：
- def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict]:
-        """
-        前向传播函数 (升级版：支持 CNN + Transformer 架构)。
-
-        Args:
-            x (torch.Tensor): 输入信号，形状 [B, 1, T]
-                (例如: B=4, T=2560 -> )
-
-        Returns:
-            recon (torch.Tensor): 重建信号，[B, 1, T]
-            indices (torch.Tensor): VQ 离散 token，[B, N] (N = T // 5)
-            loss (torch.Tensor): VQ 总损失（标量）
-            loss_breakdown (dict): 损失分项（commitment, diversity, ortho...）
-        """
-
-        # ======================================================================
-        # 1. CNN 编码器 (特征提取)
-        #    目标：将原始长序列压缩为较短的特征序列
-        # ======================================================================
-        # 输入 x: [B, 1, T]
-        #   (B: Batch Size, 1: 单通道电信号, T: 信号长度 2560)
-        z_cnn = self.cnn_model.encode(x)
-        # 输出 z_cnn: [B, C_CNN, N]
-        #   (C_CNN: CNN 特征维度 = 128, N: 序列长度 = T//5 = 512)
-        #   例如:
-
-```
 

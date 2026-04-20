@@ -1,0 +1,4 @@
+{
+    "model_max_length": 8192,
+    "padding_side": "left"
+}

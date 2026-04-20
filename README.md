@@ -416,9 +416,42 @@ conda activate /mnt/zzbnew/rnamodel/dengjingye/tools/conda/envs/bonito090_py39
 
 
 ---
-二阶段训练完后会构成：
+### step1：电信号->token准备
 
-![Markdown Logo](./assets/struct.png)
+依次运行脚本：
+```
+/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/vqe_workflow/step05_tokenize_trankdir/step03_dna32g_zhoukexuan.sh
+
+/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/vqe_workflow/step06_split_jsonlgz/step04_zhoukexuan.sh
+
+```
+
+### step2:tokenizer.json生成
+
+```
+/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/dolma/generate_tokenizer.sh
+
+```
+
+### step3:dolmo处理
+
+```
+/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/dolma_workflow/run_dolma_tokens_dna595g_vqe340s147000_split1280_overlap256.sh
+
+```
+
+### step4:基座模型训练
+
+```
+/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/olmo_workflow/OLMo/run_pretrain_20m_nanhu_w64_context1280_dna37g_vqe81s180000.sh
+```
+
+### step5:转换成hf格式
+
+```
+/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/olmo_workflow/OLMo/olmo2_latest_to_hf.sh
+```
+
 
 
 ## 三阶段基模隐变量做basecall训练

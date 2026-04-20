@@ -7,8 +7,8 @@
 # Change this variable to switch between different VQE model outputs (e.g., vqe25s57500, vqe43s67000, etc.)
 # 我们用595G数据训练的vqe90s160000来对human_dna_032g进行
 VQE_VERSION="vqe64k"
-DATASET_NAME="human_dna_595g"
-DATA_STRATEGY="mongoq30"
+DATASET_NAME="human_dna_032g"
+DATA_STRATEGY="lemonq0"
 
 # Split parameters
 # Split parameters
@@ -24,6 +24,9 @@ CHUNK_OVERLAP_SIZE=256
 
 BASE_INPUT_DIR="/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_595g"
 BASE_OUTPUT_DIR="/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_595g_split_overlap"
+
+BASE_INPUT_DIR="/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g"
+BASE_OUTPUT_DIR="/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split_overlap"
 
 
 # --- End of Configuration ---

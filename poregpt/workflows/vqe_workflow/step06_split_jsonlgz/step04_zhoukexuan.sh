@@ -25,8 +25,8 @@ CHUNK_OVERLAP_SIZE=256
 BASE_INPUT_DIR="/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_595g"
 BASE_OUTPUT_DIR="/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_595g_split_overlap"
 
-BASE_INPUT_DIR="/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g"
-BASE_OUTPUT_DIR="/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split_overlap"
+BASE_INPUT_DIR="/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_baseline"
+BASE_OUTPUT_DIR="/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_baseline"
 
 
 # --- End of Configuration ---

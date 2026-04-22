@@ -12,18 +12,18 @@ model:
   # 所有注意力、前馈网络和嵌入层都基于这个维度
   # 常见值：768, 1024, 2048, 4096 等
   # 示例中为 256，属于非常小的实验性模型（如 OLMo-20M）
-  d_model: 768
+  d_model: 256
 
   # 多头注意力机制中的“头”数量
   # 总注意力维度 = d_model / n_heads，每个头处理一部分信息
   # 必须能整除 d_model
   # 示例：256 / 8 = 32，每个头处理 32 维
-  n_heads: 12
+  n_heads: 8
 
   # Transformer 的层数（即堆叠的 encoder 层数量）
   # 更深的模型通常更强，但也更难训练
   # 示例中为 8 层，适合小型模型
-  n_layers: 12
+  n_layers: 8
 
   # MLP（前馈网络）的扩展比例
   # 实际 MLP 中间层宽度 = d_model * mlp_ratio
@@ -233,7 +233,7 @@ compile: null
 
 optimizer:
   name: adamw
-  learning_rate: 1.0e-4
+  learning_rate: 5.0e-4
   weight_decay: 0.1
   eps: 1e-8
   decay_norm_and_bias: true
@@ -270,8 +270,8 @@ load_path: null
 
 max_duration: 1ep
 #stop_at: 406_934
-global_train_batch_size: 512
-device_train_microbatch_size: 16
+global_train_batch_size: 4096
+device_train_microbatch_size: 32
 
 precision: amp_bf16
 
@@ -300,7 +300,11 @@ evaluators:
       memmap_dtype: uint32
       datasets:
         small_eval:
-          - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/validation/part-00-00000.npy
+          - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/validation/part-00-00000.npy
+          - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/validation/part-01-00000.npy
+          - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/validation/part-03-00000.npy
+          - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/validation/part-04-00000.npy
+          - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/validation/part-05-00000.npy
 
   ##########################
   # Downstream evaluations #
@@ -322,51 +326,64 @@ data:
     repetition_min_period: 1
     repetition_max_count: 32
   paths:
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-00-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-01-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-02-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-03-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-04-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-05-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-06-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-07-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-08-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-09-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-10-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-11-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-12-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-13-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-14-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-15-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-16-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-17-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-18-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-19-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-20-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-21-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-22-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-23-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-24-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-25-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-26-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-27-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-28-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-29-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-30-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/train/part-31-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/test/part-00-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/test/part-01-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/test/part-02-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/test/part-03-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/test/part-04-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/test/part-05-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/test/part-06-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/test/part-07-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/test/part-08-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/test/part-09-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/test/part-10-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/test/part-11-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/test/part-12-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/test/part-13-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/test/part-14-00000.npy
-    - /mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/tokens_vqe310s043000_split1280_overlap1024/test/part-15-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-00-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-01-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-02-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-03-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-04-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-05-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-06-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-07-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-08-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-09-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-10-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-11-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-12-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-13-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-14-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-15-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-16-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-17-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-18-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-19-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-20-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-21-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-22-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-23-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-24-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-25-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-26-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-27-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-28-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-30-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/train/part-31-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-00-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-01-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-02-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-03-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-04-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-05-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-06-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-07-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-08-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-09-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-10-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-11-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-12-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-13-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-14-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-15-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-16-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-17-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-18-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-19-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-20-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-21-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-22-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-23-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-24-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-25-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-26-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-27-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-28-00000.npy
+    - /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_split1280_overlap256_destination_baseline/test/part-30-00000.npy

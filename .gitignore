@@ -105,3 +105,6 @@ dorado_models/
 *.pkl
 *.safetensors
 *.csv.gz
+
+poregpt/workflows/olmo_workflow/output_20m_ctx1280-lr5e4-vqe_baseline
+poregpt/workflows/olmo_workflow/output_20m_ctx1280-lr5e4-vqe_distill003

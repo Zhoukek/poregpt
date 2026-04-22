@@ -11,7 +11,7 @@ export PYTHONPATH=/mnt/zzbnew/rnamodel/zhoukexuan/poregpt
 # INPUT_DIR="/mnt/si003067jezr/default/poregpt/dataset/human_dna_595g/memap_mongoq30/trank"
 INPUT_DIR="/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_lemonq0"
 # Output directory for .jsonl.gz files
-OUTPUT_DIR="/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g"
+OUTPUT_DIR="/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g_baseline"
 
 
 #!/bin/bash
@@ -22,7 +22,7 @@ OUTPUT_DIR="/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/dataset/human_dna_032g"
 
 
 # 模型检查点路径
-MODEL_CHECKPOINT="/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-haojieshen-model-type26-cnn_type13-teacher_model-distill0.1-lemon/encoder"
+MODEL_CHECKPOINT="/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-haojieshen-model-type26-cnn_type13-baseline_model-lemon/encoder"
 
 # Path to your trained VQ tokenizer model checkpoint (.pth file)
 

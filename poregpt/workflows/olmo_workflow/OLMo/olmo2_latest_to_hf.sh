@@ -1,2 +1,5 @@
-OLMO_OUTPUT_PATH=output_300m_ctx1280-gbsz4096-lr1e4-vqe342s036000l1
-python3 scripts/convert_olmo2_to_hf.py --input_dir "../$OLMO_OUTPUT_PATH/steps/latest-unsharded" --output_dir "../$OLMO_OUTPUT_PATH/hf_latest" --tokenizer_json_path "olmo_data/tokenizers/pore_16k/tokenizer.json"
+source /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/set_env.sh  # 你之前那个脚本
+
+export PYTHONPATH=/mnt/zzbnew/rnamodel/zhoukexuan/poregpt
+
+python3 scripts/convert_olmo2_to_hf.py --input_dir "/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/olmo_workflow/output_20m_ctx1280-lr5e4-vqe_distill003/steps/latest-unsharded" --output_dir "/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/olmo_workflow/output_20m_ctx1280-lr5e4-vqe_distill003/hf_latest" --tokenizer_json_path "/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/dolma/tokenizer.json"

@@ -395,25 +395,6 @@ conda activate /mnt/zzbnew/rnamodel/dengjingye/tools/conda/envs/bonito090_py39
 
 ## 二阶段基座模型的训练
 
-~~~
-训练采用的是OLMo框架
-
-训练入口：/mnt/zzbnew/rnamodel/zhoukexuan/OLMo/run.sh
-
-~~~
-
-需要的是，获得训练数据的：
-
-![Markdown Logo](./assets/tokens.png)
-
-
-问题：
-1. 一阶段的step02_train_vqe_model训练完怎么做衔接到二阶段的训练？
-
-2. 基座模型训练所需的数据集是在哪里？
-
-3. 训练完后是不是运行/mnt/zzbnew/rnamodel/zhoukexuan/OLMo/run_olmo_to_hf.sh，把olmo2转换成hf文件格式？
-
 
 ---
 ### step1：电信号->token准备
@@ -436,6 +417,16 @@ conda activate /mnt/zzbnew/rnamodel/dengjingye/tools/conda/envs/bonito090_py39
 ### step3:dolmo处理
 
 ```
+连接焦老师服务器：
+
+10.200.48.148
+
+jiaoshuai
+
+123abc
+
+conda activate dolmo
+
 /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/dolma_workflow/run_dolma_tokens_dna595g_vqe340s147000_split1280_overlap256.sh
 
 ```

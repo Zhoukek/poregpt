@@ -13,9 +13,9 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export WANDB_API_KEY=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
 
 torchrun --nproc_per_node=8 --rdzv_endpoint=localhost:29502 \
-	scripts/train.py configs/config_20m_vqedistill_ctx1280_dna32g.yaml \
-	--run_name="olmo-pt-bioseq-20m-dna32g-split1280_overlap1024-vqedistill001" \
+	scripts/train.py configs/config_20m_vqedistill_ctx1280_dna32g_distill.yaml \
+	--run_name="olmo-pt-bioseq-20m-dna32g-split1280_overlap256-vqe_distill" \
         --wandb.entity="zhoukek-zhejiang-university" \
         --wandb.project="olmo-pt" \
         --load_path="" \
-        --save_folder="../output_20m_ctx1280-lr1e4-vqedistill001/steps/" 
+        --save_folder="../output_20m_ctx1280-lr5e4-vqe_distill003/steps/" 2>&1 | tee run.log

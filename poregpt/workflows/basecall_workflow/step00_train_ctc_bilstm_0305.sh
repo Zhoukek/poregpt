@@ -5,8 +5,8 @@ export PYTHONPATH=/mnt/si003067jezr/default/poregpt:$PYTHONPATH
 model_name="HF_20m_DNA_VQE64K_CNN03_V20260203"
 nproc_per_node=1
 batch_size=64
-num_epochs=20
-lr="1e-3"
+num_epochs=5
+lr="2e-3"
 weight_decay="1e-4"
 warmup_ratio="0.4"
 min_lr="1e-5"
@@ -22,7 +22,7 @@ head_output_scale=5
 
 
 wandb_project="basecall"
-wandb_run_name="dna37g_${model_name}_unfreeze${unfreeze_last_n_layers}_bsz${batch_size}"
+wandb_run_name="dna32g_${model_name}_unfreeze${unfreeze_last_n_layers}_bsz${batch_size}"
 
 base_model="/mnt/zzbnew/rnamodel/model/signalDNAmodel/${model_name}/base"
 data_root="/mnt/zzbnew/rnamodel/model/signalDNAmodel/${model_name}/basecall"

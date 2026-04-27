@@ -1,24 +1,44 @@
 #!/bin/bash
+# 先加载MACA环境
+source /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/set_env.sh  # 你之前那个脚本
 
+export PYTHONPATH=/mnt/zzbnew/rnamodel/zhoukexuan/poregpt
 # --- Configuration Section ---
 # Modify these variables according to your setup
 
 # Input directory containing .npy files
-INPUT_DIR="/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_mongoq30/trank/validation/validation_00001.npy"
-OUTPUT_DIR="/mnt/zzbnew/rnamodel/shenhaojie/poregpt/dataset/human_dna_032g/memap_mongoq30"
+# Input directory containing .npy files
+# INPUT_DIR="/mnt/si003067jezr/default/poregpt/dataset/human_dna_595g/memap_mongoq30/trank"
+INPUT_DIR="/mnt/si003067jezr/default/poregpt/dataset/human_dna_032g/memap_lemonq0"
+# Output directory for .jsonl.gz files
+OUTPUT_DIR="/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-haojieshen-model-type26-cnn_type13_baseline_model_VQ_8k-lemon/human_dna_032g"
 
-MODEL_CHECKPOINT="/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/vqe_workflow/step02_train_vqe_model/test-zhoukexuan-model-type25-cnn_type2-teacher_model_distill_1/models/porepgt_vqe_tokenizer.step25000.pth"
-MODEL_TYPE=25
 
+
+#!/bin/bash
+
+# ==============================================================================
+# ⚙️ 配置区域
+# ==============================================================================
+
+
+# 模型检查点路径
+MODEL_CHECKPOINT="/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-haojieshen-model-type26-cnn_type13_baseline_model_VQ_8k-lemon/encoder"
+
+# Path to your trained VQ tokenizer model checkpoint (.pth file)
+
+
+
+MODEL_TYPE=26
 
 # Number of GPUs to use
 NUM_GPUS=4 # <--- CHANGE THIS to the number of GPUs you want to use
 
 # Batch size for tokenization (adjust based on your GPU memory)
-BATCH_SIZE=2 # Adjust as needed
+BATCH_SIZE=8 # Adjust as needed
 
 # Maximum number of concurrent tasks (recommended to match NUM_GPUS)
-MAX_CONCURRENT=$NUM_GPUS # Usually best to keep this equal to NUM_GPUS
+MAX_CONCURRENT=4 # Usually best to keep this equal to NUM_GPUS
 
 # --- End of Configuration ---
 
@@ -81,7 +101,8 @@ for npy_file in "${all_files[@]}"; do
     # ✅ Check if output file already exists, skip if it does
     if [ -f "$output_file" ]; then
         # echo "Skipping $npy_file (output file already exists: $output_file)" # Uncomment if you want to see skipped files
-        ((skipped++))
+        # ((skipped++))
+        skipped=$((skipped + 1))
         continue
     fi
 
@@ -124,9 +145,12 @@ for npy_file in "${all_files[@]}"; do
          --batch-size $BATCH_SIZE &
 
     # Increment task counter
-    ((task_count++))
+    # ((task_count++))
+    task_count=$((task_count + 1))
     # Increment processed counter (only for files that were actually submitted)
-    ((processed++))
+    # ((processed++))
+    processed=$((processed + 1))
+    
 
 done
 

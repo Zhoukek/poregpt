@@ -425,7 +425,7 @@ jiaoshuai
 
 123abc
 
-conda activate dolmo
+conda activate dolma
 
 /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/dolma_workflow/run_dolma_tokens_dna595g_vqe340s147000_split1280_overlap256.sh
 

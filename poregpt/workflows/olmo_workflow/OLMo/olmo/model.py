@@ -1287,7 +1287,16 @@ class OLMo(nn.Module):
     def __init__(self, config: ModelConfig, init_params: bool = True, codebook_path: Optional[str] = None):
         super().__init__()
         self.config = config
-        self.codebook_path = codebook_path
+        if codebook_path is not None:
+            self.codebook_path = codebook_path
+            self.tokenizer = VQETokenizer(
+                model_ckpt=self.codebook_path,
+            )
+            self.codebook = self.tokenizer._get_codebook_embed()
+        else:
+            self.codebook_path = None
+            self.tokenizer = None
+            self.codebook = None
         self.__cache = BufferCache()
 
         # Validate config.
@@ -1368,10 +1377,6 @@ class OLMo(nn.Module):
             get_causal_attention_bias(self.__cache, config.max_sequence_length, _non_meta_init_device(config))
             self.get_alibi_attention_bias(config.max_sequence_length, _non_meta_init_device(config))
 
-        self.tokenizer = VQETokenizer(
-            model_ckpt=self.codebook_path,
-        )
-        self.codebook = self.tokenizer._get_codebook_embed()
 
     def set_activation_checkpointing(
         self, strategy: Optional[ActivationCheckpointingStrategy], checkpoint_func: Optional[Callable] = None
@@ -1539,9 +1544,26 @@ class OLMo(nn.Module):
         # shape: (batch_size, seq_len, d_model)
         x = self.transformer.wte(input_ids) if input_embeddings is None else input_embeddings  # type: ignore
 
-        codeembedding = self.codebook[input_ids]
-        codeembedding = None
-        # print(f"codeembedding shape: {codeembedding.shape}")
+        # input_ids: [B, T]
+        # codebook: [65536, hidden_dim] 或 [65536, code_dim]
+
+        code_start_id = 128
+        codebook_size = self.codebook.shape[0]  # 65536
+        code_end_id = code_start_id + codebook_size  # 65664，左闭右开
+
+        # 判断哪些位置是真正的 bwav token
+        code_mask = (input_ids >= code_start_id) & (input_ids < code_end_id)
+
+        # 先默认使用原始 embedding
+        codeembedding = x.clone()
+
+        if code_mask.any():
+            code_indices = input_ids[code_mask] - code_start_id
+
+            code_values = self.codebook[code_indices]
+            code_values = code_values.to(dtype=codeembedding.dtype, device=codeembedding.device)
+
+            codeembedding[code_mask] = code_values
 
         # Apply embedding layer norm.
         if self.config.embedding_layer_norm:
@@ -1634,6 +1656,7 @@ class OLMo(nn.Module):
                         use_cache=use_cache,
                         max_doc_len=max_doc_len,
                         cu_doc_lens=cu_doc_lens,
+                        codeembedding=codeembedding,
                     )
 
                 if attn_key_values is not None:

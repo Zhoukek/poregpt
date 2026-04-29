@@ -13,9 +13,9 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 export WANDB_API_KEY=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
 
 torchrun --nproc_per_node=4 --rdzv_endpoint=localhost:29502 \
-	scripts/train.py configs/config_150m_vqed-64k_ctx1280_dna32g_teacher-codebook-aware-test.yaml \
-	--run_name="olmo-pt-bioseq-150m-dna32g-split1280_overlap256-vqe_teacher-64k-codebook-aware-test" \
+	scripts/train.py configs/config_150m_vqed-4k_ctx1280_dna32g_teacher-codebook-aware-test.yaml \
+	--run_name="olmo-pt-bioseq-150m-dna32g-split1280_overlap256-vqe_teacher-4k-codebook-aware-test" \
         --wandb.entity="zhoukek-zhejiang-university" \
         --wandb.project="olmo-pt" \
         --load_path="" \
-        --save_folder="/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-haojieshen-model-type26-cnn_type13_teacher_model_distill0.1_VQ_64k_lemon/output_150m_ctx1280-lr5e4-vqe_teacher-codebook-aware-test/steps/"
+        --save_folder="/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-haojieshen-model-type26-cnn_type13_teacher_model_distill0.1_VQ_4k_lemon/output_150m_ctx1280-lr5e4-vqe_teacher-codebook-aware-test/steps/" 2>&1 | tee run.log

@@ -443,6 +443,7 @@ if __name__ == "__main__":
         log.info("Device is CPU. Updating config...")
         cfg.model.init_device = "cpu"
         cfg.distributed_strategy = "single"  # type: ignore
-    cfg.codebook = "/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-haojieshen-model-type26-cnn_type13_teacher_model_distill0.1_VQ_64k_lemon/encoder"
+    cfg.codebook = None
+    cfg.codebook = "/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-haojieshen-model-type26-cnn_type13_teacher_model_distill0.1_VQ_4k_lemon/encoder"
     # print(cfg.codebook)
     main(cfg)

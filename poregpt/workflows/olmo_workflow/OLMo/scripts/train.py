@@ -47,6 +47,11 @@ from olmo.util import (
     log_extra_field,
     prepare_cli_environment,
 )
+import inspect
+
+# print(inspect.getfile(OLMo))
+
+# from poregpt.tokenizers import VQETokenizer
 
 log = logging.getLogger("train")
 
@@ -137,10 +142,13 @@ def main(cfg: TrainConfig) -> None:
 
     # Initialize the model.
     log.info("Building model...")
-    olmo_model = OLMo(cfg.model)
+    olmo_model = OLMo(cfg.model, codebook_path=cfg.codebook)
     log.info(f"Total number of parameters: {olmo_model.num_params():,d}")
     log.info(f"Number of non-embedding parameters: {olmo_model.num_params(include_embedding=False):,d}")
     log.info(f"Peak GPU Memory (MB) before {cfg.distributed_strategy}: {int(peak_gpu_memory() or 0)}")
+
+    log.info(f"Tokenizer codebook loaded from {cfg.codebook}")
+    log.info(f"Codebook shape: {olmo_model.codebook.shape}")
 
     # Compile one block at a time.
     if cfg.compile is not None:
@@ -150,6 +158,8 @@ def main(cfg: TrainConfig) -> None:
             block.compile(**cfg.compile.asdict())
 
     olmo_model.set_activation_checkpointing(cfg.activation_checkpointing)
+
+    # print(cfg.distributed_strategy)
 
     if cfg.distributed_strategy == DistributedStrategy.ddp:
         log.info("Wrapping model with DDP...")
@@ -433,4 +443,6 @@ if __name__ == "__main__":
         log.info("Device is CPU. Updating config...")
         cfg.model.init_device = "cpu"
         cfg.distributed_strategy = "single"  # type: ignore
+    cfg.codebook = "/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-haojieshen-model-type26-cnn_type13_teacher_model_distill0.1_VQ_64k_lemon/encoder"
+    # print(cfg.codebook)
     main(cfg)

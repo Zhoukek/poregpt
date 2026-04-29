@@ -56,6 +56,9 @@ elif sys.version_info.minor == 8:
 else:
     raise SystemExit("This script supports Python 3.8 or higher")
 
+from poregpt.tokenizers import VQETokenizer
+
+
 __all__ = [
     "LayerNormBase",
     "LayerNorm",
@@ -480,6 +483,24 @@ class OLMoBlock(nn.Module):
             except ModuleNotFoundError:
                 pass
 
+        # new for codebook-aware attention
+        self.code_q_proj = nn.Linear(
+            config.d_model,
+            config.d_model,
+            bias=False,
+            device=config.init_device,
+        )
+
+        self.code_k_proj = nn.Linear(
+            config.d_model,
+            config.d_model,
+            bias=False,
+            device=config.init_device,
+        )
+
+        # 控制 codebook attention 注入强度，建议初始值小一点
+        self.code_attn_alpha = 1.0
+
     def reset_parameters(self):
         if self.k_norm is not None:
             self.k_norm.reset_parameters()
@@ -530,7 +551,7 @@ class OLMoBlock(nn.Module):
             ensure_finite_(bias, check_neg_inf=True, check_pos_inf=False)
         return bias
 
-    def _scaled_dot_product_attention(
+    def _scaled_dot_product_attention_v0(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -545,6 +566,11 @@ class OLMoBlock(nn.Module):
         Computes scaled dot product attention on query, key and value tensors, using an optional
         attention mask if passed, and applying dropout if a probability greater than 0.0 is specified.
         """
+        print(f"max_doc_len: {max_doc_len}")
+        print(f"cu_doc_lens: {cu_doc_lens}")
+        print(f"self.flash_attn_func: {self.flash_attn_func}")
+        print(f"attn_mask: {attn_mask}")
+
         if max_doc_len is not None and cu_doc_lens is not None:
             assert self.flash_attn_varlen_func is not None, "flash-attn is required for document masking"
             assert attn_mask is None, "attn-mask is currently not supported with document masking"
@@ -561,7 +587,7 @@ class OLMoBlock(nn.Module):
                 causal=is_causal,
             )
             return r.view(B, T, -1, D).transpose(1, 2)
-        elif self.flash_attn_func is not None and attn_mask is None:
+        elif self.flash_attn_func is not None and attn_mask is None: # 运行到这里
             r = self.flash_attn_func(
                 q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), dropout_p=dropout_p, causal=is_causal
             )
@@ -585,7 +611,7 @@ class OLMoBlock(nn.Module):
                 is_causal=is_causal,
             )
 
-    def attention(
+    def attention_v0(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -645,6 +671,195 @@ class OLMoBlock(nn.Module):
             is_causal=attention_bias is None,
             max_doc_len=max_doc_len,
             cu_doc_lens=cu_doc_lens,
+        )
+
+        # Re-assemble all head outputs side-by-side.
+        att = att.transpose(1, 2).contiguous().view(B, T, C)
+
+        # Apply output projection.
+        return self.attn_out(att), present
+    
+    def _scaled_dot_product_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+        dropout_p: float = 0.0,
+        is_causal: bool = False,
+        max_doc_len: Optional[int] = None,
+        cu_doc_lens: Optional[torch.Tensor] = None,
+        code_scores: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Computes scaled dot product attention on query, key and value tensors, using an optional
+        attention mask if passed, and applying dropout if a probability greater than 0.0 is specified.
+        """
+
+        # 如果传入 code_scores，就手写 attention，不能走 flash attention / SDPA
+        if code_scores is not None:
+            assert max_doc_len is None and cu_doc_lens is None, "code_scores 暂不支持 document masking"
+
+            # torch SDPA 原来这里会处理 GQA，这里也要手动处理
+            assert k.size(1) == v.size(1)
+            num_kv_heads = k.size(1)
+            num_q_heads = q.size(1)
+
+            if num_q_heads != num_kv_heads:
+                assert num_q_heads % num_kv_heads == 0
+                k = k.repeat_interleave(num_q_heads // num_kv_heads, dim=1, output_size=num_q_heads)
+                v = v.repeat_interleave(num_q_heads // num_kv_heads, dim=1, output_size=num_q_heads)
+
+            # 原始 attention scores: [B, H, T, T]
+            attn_scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(q.size(-1))
+
+            # causal mask
+            if is_causal:
+                query_len = q.size(-2)
+                key_len = k.size(-2)
+                causal_mask = torch.ones(
+                    query_len,
+                    key_len,
+                    dtype=torch.bool,
+                    device=q.device,
+                ).tril(diagonal=key_len - query_len)
+
+                attn_scores = attn_scores.masked_fill(
+                    ~causal_mask.view(1, 1, query_len, key_len),
+                    torch.finfo(attn_scores.dtype).min,
+                )
+
+            # padding mask / attention bias
+            if attn_mask is not None:
+                attn_scores = attn_scores + attn_mask
+
+            # 加入 codebook attention scores
+            attn_scores = attn_scores + self.code_attn_alpha * code_scores.to(dtype=attn_scores.dtype)
+
+            attn_probs = torch.softmax(attn_scores, dim=-1)
+            attn_probs = F.dropout(attn_probs, p=dropout_p, training=self.training)
+
+            return torch.matmul(attn_probs, v)
+        
+        if max_doc_len is not None and cu_doc_lens is not None:
+            assert self.flash_attn_varlen_func is not None, "flash-attn is required for document masking"
+            assert attn_mask is None, "attn-mask is currently not supported with document masking"
+            B, T, D = q.size(0), q.size(2), q.size(3)
+            r = self.flash_attn_varlen_func(
+                q.transpose(1, 2).view(B * T, -1, D),
+                k.transpose(1, 2).view(B * T, -1, D),
+                v.transpose(1, 2).view(B * T, -1, D),
+                cu_doc_lens,
+                cu_doc_lens,
+                max_doc_len,
+                max_doc_len,
+                dropout_p=dropout_p,
+                causal=is_causal,
+            )
+            return r.view(B, T, -1, D).transpose(1, 2)
+        elif self.flash_attn_func is not None and attn_mask is None: # 运行到这里
+            r = self.flash_attn_func(
+                q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), dropout_p=dropout_p, causal=is_causal
+            )
+            return r.transpose(1, 2)
+        else:
+            # torch's sdpa doesn't support GQA, so we're doing this
+            assert k.size(1) == v.size(1)
+            num_kv_heads = k.size(1)
+            num_q_heads = q.size(1)
+            if num_q_heads != num_kv_heads:
+                assert num_q_heads % num_kv_heads == 0
+                k = k.repeat_interleave(num_q_heads // num_kv_heads, dim=1, output_size=num_q_heads)
+                v = v.repeat_interleave(num_q_heads // num_kv_heads, dim=1, output_size=num_q_heads)
+
+            return F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+            )
+
+    def attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attention_bias: Optional[torch.Tensor] = None,
+        layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        use_cache: bool = False,
+        max_doc_len: Optional[int] = None,
+        cu_doc_lens: Optional[torch.Tensor] = None,
+        codeembedding: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+        B, T, C = q.size()  # batch size, sequence length, d_model
+        dtype = k.dtype
+
+        # Optionally apply layer norm to keys and queries.
+        if self.q_norm is not None and self.k_norm is not None:
+            q = self.q_norm(q).to(dtype=dtype)
+            k = self.k_norm(k).to(dtype=dtype)
+
+        # Move head forward to be next to the batch dim.
+        # shape: (B, nh, T, hs)
+        q = q.view(B, T, self.config.n_heads, C // self.config.n_heads).transpose(1, 2)
+        # shape: (B, n_kv_h, T, hs)
+        k = k.view(B, T, self.config.effective_n_kv_heads, C // self.config.n_heads).transpose(1, 2)
+        # shape: (B, n_kv_h, T, hs)
+        v = v.view(B, T, self.config.effective_n_kv_heads, C // self.config.n_heads).transpose(1, 2)
+
+        if layer_past is not None:
+            past_key, past_value = layer_past
+            k = torch.cat((past_key, k), dim=-2)
+            v = torch.cat((past_value, v), dim=-2)
+
+        present = (k, v) if use_cache else None
+        query_len, key_len = q.shape[-2], k.shape[-2]  # could be different if layer_past not None
+
+        if self.config.rope:
+            # Apply rotary embeddings.
+            q, k = self.rotary_emb(q, k)
+
+        if attention_bias is not None and self.layer_id == 11:
+            # Resize and cast attention bias.
+            # The current dtype of the attention bias might not match the dtype that the SDP attn function will
+            # run in if AMP is enabled, and this can be a problem if some tokens are masked out due to padding
+            # as down-casting the attention bias to the autocast precision will result in -infs, which will
+            # cause the SDP attn function to produce NaNs.
+            attention_bias = self._cast_attn_bias(
+                attention_bias[:, :, key_len - query_len : key_len, :key_len], dtype
+            )
+
+        code_scores = None
+
+        if codeembedding is not None:
+            # codeembedding: [B, T, C]
+            code_q = self.code_q_proj(codeembedding)
+            code_k = self.code_k_proj(codeembedding)
+
+            # [B, T, C] -> [B, H, T, D]
+            code_q = code_q.view(B, T, self.config.n_heads, C // self.config.n_heads).transpose(1, 2)
+            code_k = code_k.view(B, T, self.config.n_heads, C // self.config.n_heads).transpose(1, 2)
+
+            # 如果有 KV cache，当前先不建议用于推理 cache 场景
+            if key_len != query_len:
+                raise NotImplementedError("codebook attention 暂不建议和 KV cache 一起用")
+
+            code_scores = torch.matmul(code_q, code_k.transpose(-1, -2)) / math.sqrt(C // self.config.n_heads)
+
+            # Get the attention scores.
+            # shape: (B, nh, T, hs)
+        att = self._scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attention_bias,
+            dropout_p=0.0 if not self.training else self.config.attention_dropout,
+            is_causal=attention_bias is None,
+            max_doc_len=max_doc_len,
+            cu_doc_lens=cu_doc_lens,
+            code_scores=code_scores,
         )
 
         # Re-assemble all head outputs side-by-side.
@@ -733,6 +948,7 @@ class OLMoSequentialBlock(OLMoBlock):
         use_cache: bool = False,
         max_doc_len: Optional[int] = None,
         cu_doc_lens: Optional[torch.Tensor] = None,
+        codeembedding: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # Get query, key, value projections.
         # shape:
@@ -741,7 +957,6 @@ class OLMoSequentialBlock(OLMoBlock):
         #                      k, v: (batch_size, seq_len, d_model // n_heads)
         #  - for group query attn q: (batch_size, seq_len, d_model)
         #                      k, v: (batch_size, seq_len, d_model // n_kv_heads)
-
         # apply norm before
         if not self.config.norm_after:
             if self._activation_checkpoint_fn is not None:
@@ -781,6 +996,7 @@ class OLMoSequentialBlock(OLMoBlock):
                 use_cache=use_cache,
                 max_doc_len=max_doc_len,
                 cu_doc_lens=cu_doc_lens,
+                codeembedding=codeembedding,
             )
 
         if self.config.norm_after:
@@ -1068,9 +1284,10 @@ class OLMoBlockGroup(nn.ModuleList):
 
 
 class OLMo(nn.Module):
-    def __init__(self, config: ModelConfig, init_params: bool = True):
+    def __init__(self, config: ModelConfig, init_params: bool = True, codebook_path: Optional[str] = None):
         super().__init__()
         self.config = config
+        self.codebook_path = codebook_path
         self.__cache = BufferCache()
 
         # Validate config.
@@ -1150,6 +1367,11 @@ class OLMo(nn.Module):
         if self.config.alibi:
             get_causal_attention_bias(self.__cache, config.max_sequence_length, _non_meta_init_device(config))
             self.get_alibi_attention_bias(config.max_sequence_length, _non_meta_init_device(config))
+
+        self.tokenizer = VQETokenizer(
+            model_ckpt=self.codebook_path,
+        )
+        self.codebook = self.tokenizer._get_codebook_embed()
 
     def set_activation_checkpointing(
         self, strategy: Optional[ActivationCheckpointingStrategy], checkpoint_func: Optional[Callable] = None
@@ -1317,6 +1539,10 @@ class OLMo(nn.Module):
         # shape: (batch_size, seq_len, d_model)
         x = self.transformer.wte(input_ids) if input_embeddings is None else input_embeddings  # type: ignore
 
+        codeembedding = self.codebook[input_ids]
+        codeembedding = None
+        # print(f"codeembedding shape: {codeembedding.shape}")
+
         # Apply embedding layer norm.
         if self.config.embedding_layer_norm:
             x = self.transformer.emb_norm(x)
@@ -1388,7 +1614,7 @@ class OLMo(nn.Module):
                     all_hidden_states.append(x)
 
                 layer_past = None if past_key_values is None else past_key_values[block_idx]
-                if should_checkpoint_block(self.activation_checkpointing_strategy, block_idx):
+                if should_checkpoint_block(self.activation_checkpointing_strategy, block_idx): # false
                     # shape: (batch_size, seq_len, d_model)
                     x, cache = self._activation_checkpoint_fn(
                         block,
@@ -1400,7 +1626,7 @@ class OLMo(nn.Module):
                         cu_doc_lens=cu_doc_lens,
                     )
                 else:
-                    # shape: (batch_size, seq_len, d_model)
+                    # shape: (batch_size, seq_len, d_model) (16,1280,768)
                     x, cache = block(
                         x,
                         attention_bias=attention_bias,

@@ -734,7 +734,13 @@ class OLMoBlock(nn.Module):
                 attn_scores = attn_scores + attn_mask
 
             # 加入 codebook attention scores
-            attn_scores = attn_scores + self.code_attn_alpha * code_scores.to(dtype=attn_scores.dtype)
+            attn_scores = attn_scores + self.code_attn_alpha * code_scores.to(dtype=attn_scores.dtype) # 形状是一样的
+
+            # print("attn_scores mean/std:", attn_scores.mean().item(), attn_scores.std().item())
+            # print("code_scores mean/std:", code_scores.mean().item(), code_scores.std().item())
+            # print("scaled code mean/std:", 
+            #       (self.code_attn_alpha * 100 * code_scores).mean().item(),
+            #       (self.code_attn_alpha * 100 * code_scores).std().item())
 
             attn_probs = torch.softmax(attn_scores, dim=-1)
             attn_probs = F.dropout(attn_probs, p=dropout_p, training=self.training)
@@ -821,7 +827,7 @@ class OLMoBlock(nn.Module):
             # Apply rotary embeddings.
             q, k = self.rotary_emb(q, k)
 
-        if attention_bias is not None and self.layer_id == 11:
+        if attention_bias is not None:
             # Resize and cast attention bias.
             # The current dtype of the attention bias might not match the dtype that the SDP attn function will
             # run in if AMP is enabled, and this can be a problem if some tokens are masked out due to padding
@@ -833,7 +839,7 @@ class OLMoBlock(nn.Module):
 
         code_scores = None
 
-        if codeembedding is not None:
+        if codeembedding is not None and self.layer_id in [11, 10, 9, 8]:
             # codeembedding: [B, T, C]
             code_q = self.code_q_proj(codeembedding)
             code_k = self.code_k_proj(codeembedding)
@@ -1577,7 +1583,7 @@ class OLMo(nn.Module):
             pos_emb = self.transformer.wpe(pos)  # type: ignore
             x = pos_emb + x
 
-        # Apply dropout.
+        # Apply dropout.9b gg
         # shape: (batch_size, seq_len, d_model)
         x = self.transformer.emb_drop(x)  # type: ignore
 

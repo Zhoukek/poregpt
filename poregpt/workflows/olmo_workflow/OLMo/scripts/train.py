@@ -444,6 +444,6 @@ if __name__ == "__main__":
         cfg.model.init_device = "cpu"
         cfg.distributed_strategy = "single"  # type: ignore
     cfg.codebook = None
-    cfg.codebook = "/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-haojieshen-model-type26-cnn_type13_teacher_model_distill0.1_VQ_4k_lemon/encoder"
+    cfg.codebook = "/mnt/zzbnew/rnamodel/shenhaojie/signalDNAmodel/test-haojieshen-model-type26-cnn_type13_teacher_model_distill0.1_VQ_64k_lemon/encoder"
     # print(cfg.codebook)
     main(cfg)

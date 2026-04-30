@@ -22,8 +22,16 @@ from typing import Any, Dict
 import torch
 import yaml
 from tokenizers import Tokenizer
+import inspect
+
 from transformers import Olmo2Config, Olmo2ForCausalLM
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
+
+
+
+print("Olmo2ForCausalLM:", inspect.getfile(Olmo2ForCausalLM))
+print("Olmo2Config:", inspect.getfile(Olmo2Config))
+print("GPT2TokenizerFast:", inspect.getfile(GPT2TokenizerFast))
 
 """
 Sample usage:

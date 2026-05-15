@@ -29,9 +29,9 @@ from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 
 
 
-print("Olmo2ForCausalLM:", inspect.getfile(Olmo2ForCausalLM))
-print("Olmo2Config:", inspect.getfile(Olmo2Config))
-print("GPT2TokenizerFast:", inspect.getfile(GPT2TokenizerFast))
+# print("Olmo2ForCausalLM:", inspect.getfile(Olmo2ForCausalLM))
+# print("Olmo2Config:", inspect.getfile(Olmo2Config))
+# print("GPT2TokenizerFast:", inspect.getfile(GPT2TokenizerFast))
 
 """
 Sample usage:
@@ -216,6 +216,10 @@ def write_model(
 
     print("Loading the checkpoint in a OLMo2 model.")
     model = Olmo2ForCausalLM.from_pretrained(tmp_model_path, torch_dtype=torch.float32, low_cpu_mem_usage=True)
+    
+    print(model)
+
+
     # Avoid saving this as part of the config.
     del model.config._name_or_path
     print("Saving in the Transformers format.")

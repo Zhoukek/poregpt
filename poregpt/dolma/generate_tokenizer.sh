@@ -4,7 +4,7 @@
 # 功能：根据指定的K值生成tokenizer.json文件
 
 # 设置K值（码本大小）- 请在此处修改K值
-K=65536
+K=625
 
 # 设置输出文件路径 - 请在此处修改输出文件名
 OUTPUT="tokenizer.json"

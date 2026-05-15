@@ -144,6 +144,75 @@ class TransformerPreHead(nn.Module):
         return self.encoder(x)
 
 
+class TCNBlock(nn.Module):
+    def __init__(self, channels: int, kernel_size: int, dilation: int, dropout: float = 0.1) -> None:
+        super().__init__()
+        padding = ((kernel_size - 1) * dilation) // 2
+        self.conv1 = nn.Conv1d(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=kernel_size,
+            dilation=dilation,
+            padding=padding,
+        )
+        self.conv2 = nn.Conv1d(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=kernel_size,
+            dilation=dilation,
+            padding=padding,
+        )
+        self.norm1 = nn.LayerNorm(channels)
+        self.norm2 = nn.LayerNorm(channels)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        y = x.transpose(1, 2)
+        y = self.conv1(y).transpose(1, 2)
+        y = self.norm1(y)
+        y = self.activation(y)
+        y = self.dropout(y)
+
+        y = y.transpose(1, 2)
+        y = self.conv2(y).transpose(1, 2)
+        y = self.norm2(y)
+        y = self.activation(y)
+        y = self.dropout(y)
+        return residual + y
+
+
+class TCNPreHead(nn.Module):
+    def __init__(
+        self,
+        model_dim: int,
+        kernel_size: int = 3,
+        num_layers: int = 4,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        if kernel_size % 2 == 0:
+            raise ValueError("TCN kernel_size must be odd to keep sequence length unchanged.")
+        self.blocks = nn.ModuleList(
+            [
+                TCNBlock(
+                    channels=model_dim,
+                    kernel_size=kernel_size,
+                    dilation=2**layer_idx,
+                    dropout=dropout,
+                )
+                for layer_idx in range(num_layers)
+            ]
+        )
+        self.output_dim = model_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+
 class BasecallModel(nn.Module):
     """
     input_ids: [B, T]
@@ -154,7 +223,10 @@ class BasecallModel(nn.Module):
         model_path: str,
         num_classes: int = NUM_CLASSES,
         hidden_layer: int = -1,          # 选哪一层 hidden_states
+        learnable_fuse_last_n_layers: int = 0,  # 0=关闭；>0 时对最后 N 层做 softmax 可学习加权融合
         feature_source: str = "hidden",   # hidden | embedding
+        vq_device: str = "cuda",
+        vq_token_batch_size: int = 100,
         freeze_backbone: bool = False,   # ✅ 新增：是否冻结基座（默认不冻结，保持你原行为）
         reset_backbone_weights: bool = False,  # ✅ 可选：重置基座权重用于消融
         unfreeze_last_n_layers: int = 0,  # 可选：仅解冻最后 N 层（其余保持冻结）
@@ -172,73 +244,100 @@ class BasecallModel(nn.Module):
     ):
         super().__init__()
         self.hidden_layer = hidden_layer
+        self.learnable_fuse_last_n_layers = max(0, int(learnable_fuse_last_n_layers))
         self.feature_source = feature_source
         self.freeze_backbone = bool(freeze_backbone)
         self.unfreeze_last_n_layers = max(0, int(unfreeze_last_n_layers))
         self.unfreeze_layer_start = unfreeze_layer_start
         self.unfreeze_layer_end = unfreeze_layer_end
+        self.tokenizer = None
+        self.backbone = None
+        self.vq_embedding = None
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True
-        )
+        if self.feature_source not in {"hidden", "embedding", "vq_embedding"}:
+            raise ValueError(f"Unsupported feature_source: {self.feature_source}. Use 'hidden', 'embedding' or 'vq_embedding'.")
+        if self.feature_source != "hidden" and self.learnable_fuse_last_n_layers > 0:
+            raise ValueError("learnable_fuse_last_n_layers requires feature_source='hidden'.")
+        self.layer_fuse_logits: nn.Parameter | None = None
+        if self.learnable_fuse_last_n_layers > 0:
+            self.layer_fuse_logits = nn.Parameter(torch.zeros(self.learnable_fuse_last_n_layers))
+        if self.feature_source == "vq_embedding":
+            try:
+                from poregpt.tokenizers import VQETokenizer
+            except ModuleNotFoundError as exc:
+                raise ModuleNotFoundError(
+                    "feature_source='vq_embedding' requires `poregpt` to be installed in the runtime environment."
+                ) from exc
 
-        if reset_backbone_weights:
-            backbone_config = AutoConfig.from_pretrained(
-                model_path,
-                trust_remote_code=True,
+            vq_tokenizer = VQETokenizer(
+                model_ckpt=model_path,
+                device=vq_device,
+                token_batch_size=vq_token_batch_size,
             )
-            self.backbone = AutoModel.from_config(
-                backbone_config,
-                trust_remote_code=True,
-            )
+            codebook = vq_tokenizer._get_codebook_embed()
+            if hasattr(codebook, "detach"):
+                codebook = codebook.detach().cpu()
+            codebook = torch.as_tensor(codebook, dtype=torch.float32)
+            self.vq_embedding = nn.Embedding.from_pretrained(codebook, freeze=True)
+            hidden_size = int(codebook.shape[1])
         else:
-            self.backbone = AutoModel.from_pretrained(
-                model_path,
-                trust_remote_code=True,
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_path, trust_remote_code=True
             )
-
-        if self.feature_source not in {"hidden", "embedding"}:
-            raise ValueError(f"Unsupported feature_source: {self.feature_source}. Use 'hidden' or 'embedding'.")
-
-        # 省显存：关闭 cache（很多 decoder-only 默认开）
-        if hasattr(self.backbone.config, "use_cache"):
-            self.backbone.config.use_cache = False
-
-        # ✅ 冻结基座（核心）
-        if self.freeze_backbone or self.unfreeze_last_n_layers > 0 or unfreeze_layer_start is not None or unfreeze_layer_end is not None:
-            for p in self.backbone.parameters():
-                p.requires_grad = False
-            if self.freeze_backbone and self.unfreeze_last_n_layers == 0:
-                self.backbone.eval()  # 固定 dropout 等推理行为（推荐）
-
-        # ✅ 可选：仅解冻最后 N 层
-        if self.unfreeze_last_n_layers > 0 or unfreeze_layer_start is not None or unfreeze_layer_end is not None:
-            layers = self._get_transformer_layers()
-            n_layers = len(layers)
-            if unfreeze_layer_start is not None or unfreeze_layer_end is not None:
-                start = 0 if unfreeze_layer_start is None else int(unfreeze_layer_start)
-                end = n_layers if unfreeze_layer_end is None else int(unfreeze_layer_end)
-                if start < 0:
-                    start = n_layers + start
-                if end < 0:
-                    end = n_layers + end
-                if not 0 <= start <= end <= n_layers:
-                    raise ValueError(f"Invalid unfreeze layer range: [{start}, {end}) with {n_layers} layers.")
-                target_layers = layers[start:end]
+            if reset_backbone_weights:
+                backbone_config = AutoConfig.from_pretrained(
+                    model_path,
+                    trust_remote_code=True,
+                )
+                self.backbone = AutoModel.from_config(
+                    backbone_config,
+                    trust_remote_code=True,
+                )
             else:
-                n_unfreeze = min(self.unfreeze_last_n_layers, n_layers)
-                target_layers = layers[-n_unfreeze:]
-            for layer in target_layers:
-                for p in layer.parameters():
-                    p.requires_grad = True
+                self.backbone = AutoModel.from_pretrained(
+                    model_path,
+                    trust_remote_code=True,
+                )
 
-        hidden_size = (
-            getattr(self.backbone.config, "hidden_size", None)
-            or getattr(self.backbone.config, "d_model", None)
-            or getattr(self.backbone.config, "n_embd", None)
-        )
-        if hidden_size is None:
-            raise ValueError("Cannot infer hidden_size from backbone config.")
+            # 省显存：关闭 cache（很多 decoder-only 默认开）
+            if hasattr(self.backbone.config, "use_cache"):
+                self.backbone.config.use_cache = False
+
+            # ✅ 冻结基座（核心）
+            if self.freeze_backbone or self.unfreeze_last_n_layers > 0 or unfreeze_layer_start is not None or unfreeze_layer_end is not None:
+                for p in self.backbone.parameters():
+                    p.requires_grad = False
+                if self.freeze_backbone and self.unfreeze_last_n_layers == 0:
+                    self.backbone.eval()  # 固定 dropout 等推理行为（推荐）
+
+            # ✅ 可选：仅解冻最后 N 层
+            if self.unfreeze_last_n_layers > 0 or unfreeze_layer_start is not None or unfreeze_layer_end is not None:
+                layers = self._get_transformer_layers()
+                n_layers = len(layers)
+                if unfreeze_layer_start is not None or unfreeze_layer_end is not None:
+                    start = 0 if unfreeze_layer_start is None else int(unfreeze_layer_start)
+                    end = n_layers if unfreeze_layer_end is None else int(unfreeze_layer_end)
+                    if start < 0:
+                        start = n_layers + start
+                    if end < 0:
+                        end = n_layers + end
+                    if not 0 <= start <= end <= n_layers:
+                        raise ValueError(f"Invalid unfreeze layer range: [{start}, {end}) with {n_layers} layers.")
+                    target_layers = layers[start:end]
+                else:
+                    n_unfreeze = min(self.unfreeze_last_n_layers, n_layers)
+                    target_layers = layers[-n_unfreeze:]
+                for layer in target_layers:
+                    for p in layer.parameters():
+                        p.requires_grad = True
+
+            hidden_size = (
+                getattr(self.backbone.config, "hidden_size", None)
+                or getattr(self.backbone.config, "d_model", None)
+                or getattr(self.backbone.config, "n_embd", None)
+            )
+            if hidden_size is None:
+                raise ValueError("Cannot infer hidden_size from backbone config.")
 
         if num_classes is None:
             num_classes = NUM_CLASSES
@@ -297,6 +396,8 @@ class BasecallModel(nn.Module):
                     f"hidden_size={hidden_size} must be divisible by transformer nhead={transformer_nhead}."
                 )
             return TransformerPreHead(model_dim=hidden_size, nhead=transformer_nhead)
+        if pre_head_type == "tcn":
+            return TCNPreHead(model_dim=hidden_size)
         raise ValueError(f"Unsupported pre_head_type: {pre_head_type}")
 
     def _get_transformer_layers(self) -> nn.ModuleList:
@@ -332,6 +433,7 @@ class BasecallModel(nn.Module):
             and self.unfreeze_last_n_layers == 0
             and self.unfreeze_layer_start is None
             and self.unfreeze_layer_end is None
+            and self.backbone is not None
         ):
             self.backbone.eval()
         return self
@@ -341,7 +443,9 @@ class BasecallModel(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.feature_source == "embedding":
+        if self.feature_source == "vq_embedding":
+            hidden = self.vq_embedding(input_ids)
+        elif self.feature_source == "embedding":
             embedding_layer = self.backbone.get_input_embeddings()
             if embedding_layer is None:
                 raise ValueError("Backbone does not expose input embeddings via get_input_embeddings().")
@@ -356,13 +460,25 @@ class BasecallModel(nn.Module):
 
             hidden_states = outputs.hidden_states  # tuple(len = n_layers + 1)
 
-            try:
-                hidden = hidden_states[self.hidden_layer]
-            except IndexError:
-                raise ValueError(
-                    f"hidden_layer={self.hidden_layer} out of range "
-                    f"(num hidden states = {len(hidden_states)})"
-                )
+            if self.learnable_fuse_last_n_layers > 0:
+                n_hidden_layers = len(hidden_states) - 1
+                if n_hidden_layers < self.learnable_fuse_last_n_layers:
+                    raise ValueError(
+                        "learnable_fuse_last_n_layers out of range "
+                        f"(requested={self.learnable_fuse_last_n_layers}, available_hidden_layers={n_hidden_layers})."
+                    )
+                selected = hidden_states[-self.learnable_fuse_last_n_layers:]
+                stacked = torch.stack(selected, dim=0)  # [N, B, T, H]
+                weights = torch.softmax(self.layer_fuse_logits, dim=0).to(stacked.dtype)  # [N]
+                hidden = torch.sum(stacked * weights.view(-1, 1, 1, 1), dim=0)
+            else:
+                try:
+                    hidden = hidden_states[self.hidden_layer]
+                except IndexError:
+                    raise ValueError(
+                        f"hidden_layer={self.hidden_layer} out of range "
+                        f"(num hidden states = {len(hidden_states)})"
+                    )
 
         hidden = self.pre_head(hidden)
         logits_btc = self.base_head(hidden)

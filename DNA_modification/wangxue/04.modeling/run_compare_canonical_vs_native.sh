@@ -1,0 +1,12 @@
+python -m script.mod_v1.compare_canonical_vs_native \
+  --canonical_latent result/models/model1/canonical_model1_latent.npy \
+  --canonical_residual result/models/model1/canonical_model1_residual.npy \
+  --canonical_mse result/models/model1/canonical_model1_recon_mse.npy \
+  --canonical_source_index result/models/model1/canonical_model1_source_index.npy \
+  --canonical_source_map result/models/model1/source_map.json \
+  --native_latent result/infer/model1_out/native_model1_latent.npy \
+  --native_residual result/infer/model1_out/native_model1_residual.npy \
+  --native_mse result/infer/model1_out/native_model1_recon_mse.npy \
+  --native_source_index result/infer/model1_out/native_model1_source_index.npy \
+  --native_source_map result/infer/model1_out/source_map.json \
+  --out_dir compare_out

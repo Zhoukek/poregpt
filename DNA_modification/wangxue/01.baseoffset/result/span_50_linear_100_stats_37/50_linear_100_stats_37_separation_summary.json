@@ -1,0 +1,121 @@
+{
+  "config": {
+    "data_jsonl": "/mnt/zzbnew/rnamodel/wangxue/DNA_modification/03.token/result_0331/LB07_1/signal_none.adjusted.jsonl",
+    "out_dir": "result/span_50_linear_100_stats_37",
+    "limit": 10000,
+    "span_field": "base_sample_spans_rel",
+    "signal_field": "signal",
+    "pattern_field": "pattern",
+    "read_id_field": "read_id",
+    "offsets": [
+      -3.7
+    ],
+    "prefix": "50_linear_100_stats_37",
+    "min_segment_len": 1,
+    "plot_bins": 90
+  },
+  "run_stats": {
+    "records_loaded": 1000,
+    "reads_processed": 1000,
+    "reads_skipped_missing_field": 0,
+    "reads_skipped_invalid_span": 0,
+    "reads_skipped_empty_signal": 0,
+    "reads_skipped_no_value": 0,
+    "reads_failed_exception": 0
+  },
+  "ranking_metric": "min_pairwise_cohens_d",
+  "offsets": {
+    "left3p7": {
+      "offset": -3.7,
+      "plot_path": "result/span_50_linear_100_stats_37/50_linear_100_stats_37_left3p7_distribution.png",
+      "total_intervals": 133000,
+      "bases": {
+        "A": {
+          "count": 39000,
+          "mean": 68.15239801548707,
+          "std": 11.831913818358943,
+          "median": 68.12403392791748,
+          "min": 8.976281325022379,
+          "max": 436.1191126505534,
+          "p01": 43.39976088305704,
+          "p05": 50.35416836738587,
+          "p25": 60.92334875984797,
+          "p75": 75.09020531518118,
+          "p95": 85.38346345541358,
+          "p99": 93.23503498513361
+        },
+        "T": {
+          "count": 34000,
+          "mean": 86.62837223215723,
+          "std": 10.801164165433697,
+          "median": 86.24567791865422,
+          "min": -12.647626583392803,
+          "max": 372.5131484440395,
+          "p01": 64.51219297027588,
+          "p05": 71.33457863190596,
+          "p25": 79.99032983445284,
+          "p75": 92.79351019859314,
+          "p95": 102.5975635256086,
+          "p99": 109.93331883239748
+        },
+        "G": {
+          "count": 25000,
+          "mean": 63.480539127739554,
+          "std": 11.089990294116973,
+          "median": 63.34023054079576,
+          "min": -17.85808828141954,
+          "max": 327.16991806030273,
+          "p01": 40.63795518009603,
+          "p05": 46.84112941953871,
+          "p25": 56.36755032766433,
+          "p75": 70.32138424827939,
+          "p95": 80.19103501456124,
+          "p99": 87.09792103050994
+        },
+        "C": {
+          "count": 35000,
+          "mean": 80.30706894795084,
+          "std": 9.572801106421673,
+          "median": 79.96339058876038,
+          "min": -42.48646015591092,
+          "max": 412.78117141723635,
+          "p01": 61.78497738436186,
+          "p05": 67.06495479311262,
+          "p25": 74.6285989999771,
+          "p75": 85.57669515777052,
+          "p95": 93.70996215201711,
+          "p99": 99.63915852137974
+        }
+      },
+      "primary_metric": "min_pairwise_cohens_d",
+      "min_pairwise_cohens_d": 0.4045678083042121,
+      "mean_pairwise_cohens_d": 1.2561449378854659,
+      "min_pairwise_bhattacharyya_distance": 0.021796467265978368,
+      "mean_pairwise_bhattacharyya_distance": 0.2454793703548488
+    }
+  },
+  "ranking": [
+    {
+      "rank": 1,
+      "offset_label": "left3p7",
+      "offset": -3.7,
+      "total_intervals": 133000,
+      "min_pairwise_cohens_d": 0.4045678083042121,
+      "mean_pairwise_cohens_d": 1.2561449378854659,
+      "min_pairwise_bhattacharyya_distance": 0.021796467265978368,
+      "mean_pairwise_bhattacharyya_distance": 0.2454793703548488,
+      "plot_path": "result/span_50_linear_100_stats_37/50_linear_100_stats_37_left3p7_distribution.png"
+    }
+  ],
+  "best_offset_by_min_pairwise_cohens_d": {
+    "rank": 1,
+    "offset_label": "left3p7",
+    "offset": -3.7,
+    "total_intervals": 133000,
+    "min_pairwise_cohens_d": 0.4045678083042121,
+    "mean_pairwise_cohens_d": 1.2561449378854659,
+    "min_pairwise_bhattacharyya_distance": 0.021796467265978368,
+    "mean_pairwise_bhattacharyya_distance": 0.2454793703548488,
+    "plot_path": "result/span_50_linear_100_stats_37/50_linear_100_stats_37_left3p7_distribution.png"
+  }
+}

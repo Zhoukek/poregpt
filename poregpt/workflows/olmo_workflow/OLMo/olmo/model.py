@@ -839,7 +839,7 @@ class OLMoBlock(nn.Module):
 
         code_scores = None
 
-        if codeembedding is not None and self.layer_id in [11, 10, 9, 8]:
+        if codeembedding is not None and self.layer_id in [11]:
             # codeembedding: [B, T, C]
             code_q = self.code_q_proj(codeembedding)
             code_k = self.code_k_proj(codeembedding)
@@ -1298,7 +1298,10 @@ class OLMo(nn.Module):
             self.tokenizer = VQETokenizer(
                 model_ckpt=self.codebook_path,
             )
-            self.codebook = self.tokenizer._get_codebook_embed()
+            self.codebook = nn.Parameter(
+                self.tokenizer._get_codebook_embed().clone(), 
+                requires_grad=False  # 可选
+            )
         else:
             self.codebook_path = None
             self.tokenizer = None
@@ -1362,8 +1365,9 @@ class OLMo(nn.Module):
             self.transformer.update(
                 {
                     "ff_out": nn.Linear(
-                        config.d_model,
-                        config.embedding_size or config.vocab_size,
+                        # config.d_model, 
+                        config.d_model + self.codebook.shape[1] if self.codebook is not None else config.d_model, # 在这一块做了改动
+                        config.embedding_size or config.vocab_size, 
                         bias=config.include_bias,
                         device=config.init_device,
                     )
@@ -1665,6 +1669,7 @@ class OLMo(nn.Module):
                         codeembedding=codeembedding,
                     )
 
+
                 if attn_key_values is not None:
                     assert cache is not None
                     attn_key_values.append(cache)
@@ -1700,6 +1705,10 @@ class OLMo(nn.Module):
         # Apply final layer norm.
         # shape: (batch_size, seq_len or 1, d_model)
         x = self.transformer.ln_f(x)  # type: ignore
+        
+        # 新增加的内容
+        x = torch.cat((x,codeembedding), dim=2) 
+
         if output_hidden_states:
             # add final hidden state post-final-layernorm, following HuggingFace's convention
             all_hidden_states.append(x)

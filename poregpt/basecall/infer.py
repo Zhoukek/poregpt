@@ -12,6 +12,7 @@ import math
 import json
 import os
 import gzip
+import re
 from typing import List, Tuple, Iterable
 
 import torch
@@ -19,8 +20,26 @@ from tqdm import tqdm
 
 from .ctc_crf import decode as ctc_crf_decode
 from .model import BasecallModel
-from .utils import ID2BASE, BLANK_IDX, seed_everything, resolve_input_lengths, infer_head_config_from_state_dict
+from .utils import (
+    ID2BASE,
+    BLANK_IDX,
+    seed_everything,
+    resolve_input_lengths,
+    infer_head_config_from_state_dict,
+    infer_pre_head_type_from_state_dict,
+)
 from .metrics import ctc_viterbi_decode, koi_beam_search_decode
+
+
+def _print_model_structure(model: torch.nn.Module, *, prefix: str = "[Model]") -> None:
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"{prefix} class={model.__class__.__name__}")
+    print(f"{prefix} pre_head={model.pre_head.__class__.__name__} head={model.base_head.__class__.__name__}")
+    print(f"{prefix} params total={total_params:,} trainable={trainable_params:,}")
+    print(f"{prefix} structure:")
+    print(model)
+
 
 def _phred_to_char(q: int) -> str:
     # standard Sanger FASTQ (Phred+33)
@@ -67,6 +86,15 @@ def split_bwav_tokens(text: str) -> List[str]:
         tokens.append(text[start : end + 2])
         i = end + 2
     return tokens
+
+
+_BWAV_TOKEN_RE = re.compile(r"<\|bwav:(\d+)\|>")
+
+
+def apply_token_offset_to_signal_str(signal_str: str, token_offset: int) -> str:
+    if token_offset <= 0 or not signal_str:
+        return signal_str
+    return _BWAV_TOKEN_RE.sub(lambda m: f"<|bwav:{int(m.group(1)) + token_offset}|>", signal_str)
 
 
 def chunk_tokens(tokens: List[str], max_tokens: int, overlap: int) -> List[List[str]]:
@@ -182,18 +210,8 @@ def main():
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--amp", action="store_true")
     ap.add_argument("--beam_width", type=int, default=32)
-    ap.add_argument("--koi_beam_cut", type=float, default=100.0,
-                    help="Beam cut value for Koi beam_search decoding.")
-    ap.add_argument("--koi_scale", type=float, default=1.0,
-                    help="Scale applied to scores for Koi beam_search decoding.")
-    ap.add_argument("--koi_offset", type=float, default=0.0,
-                    help="Offset applied to scores for Koi beam_search decoding.")
-    ap.add_argument("--koi_blank_score", type=float, default=2.0,
-                    help="Blank score used for Koi beam_search decoding.")
     ap.add_argument("--ctc_crf_blank_score", type=float, default=2.0,
                     help="Blank score used by CTC-CRF head logits (keep consistent with training).")
-    ap.add_argument("--koi_reverse", action="store_true",
-                    help="Reverse sequence output for Koi beam_search decoding.")
     ap.add_argument("--decoder", choices=["auto", "ctc_viterbi", "koi", "ctc_crf"], default="auto",
                     help="Decoder to use. auto picks ctc_viterbi for CTC head and ctc_crf for CTC-CRF head.")
     ap.add_argument("--head_type", choices=["ctc", "ctc_crf"], default=None,
@@ -206,17 +224,19 @@ def main():
     ap.add_argument("--overlap", type=int, default=128)
     ap.add_argument("--hidden_layer", type=int, default=-1,
                     help="Which backbone hidden layer to use when --feature_source hidden.")
+    ap.add_argument("--learnable_fuse_last_n_layers", type=int, default=0,
+                    help="If >0, learn a softmax-weighted fusion over the last N hidden layers (overrides --hidden_layer).")
     ap.add_argument("--feature_source", "--feature-source", choices=["hidden", "embedding"], default="hidden",
                     help="Use transformer hidden states or input embeddings as head input features.")
-    ap.add_argument("--head_output_activation", choices=["tanh", "relu"], default=None,
-                    help="Optional activation applied to head output logits.")
-    ap.add_argument("--head_output_scale", type=float, default=None,
-                    help="Optional scalar applied to head output logits (after activation).")
-    ap.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer"], default="none",
-                    help="Optional module before CTC-CRF head.")
+    ap.add_argument("--pre_head_type", choices=["auto", "none", "bilstm", "transformer", "tcn"], default="auto",
+                    help="Optional module before CTC-CRF head. Default auto-infers from checkpoint.")
     ap.add_argument("--pre_head_transformer_nhead", type=int, default=8,
                     help="Attention heads for --pre_head_type transformer.")
+    ap.add_argument("--token_offset", type=int, default=0,
+                    help="Add this offset to each <|bwav:ID|> token in input signal_str (e.g. 0->128).")
     args = ap.parse_args()
+    if args.token_offset < 0:
+        raise ValueError("--token_offset must be >= 0")
 
     seed_everything(42)
     device = torch.device(args.device)
@@ -235,7 +255,17 @@ def main():
     else:
         sd = state
     head_config = infer_head_config_from_state_dict(sd)
+    inferred_pre_head_type = infer_pre_head_type_from_state_dict(sd)
     head_type = args.head_type or head_config.get("head_type", "ctc")
+    pre_head_type = args.pre_head_type
+    if pre_head_type == "auto":
+        pre_head_type = inferred_pre_head_type
+        print(f"[Model] pre_head_type auto -> {pre_head_type}")
+    elif pre_head_type != inferred_pre_head_type:
+        print(
+            "[Model][Warning] --pre_head_type overrides checkpoint inference: "
+            f"arg={pre_head_type}, inferred={inferred_pre_head_type}"
+        )
     # load model
     n_base = len(ID2BASE) - 1
     state_len = args.ctc_crf_state_len
@@ -243,8 +273,10 @@ def main():
     if decoder_mode == "auto":
         decoder_mode = "ctc_viterbi" if head_type == "ctc" else "ctc_crf"
 
-    if head_type == "ctc" and decoder_mode not in {"ctc_viterbi"}:
-        raise ValueError("CTC head supports only --decoder ctc_viterbi (or auto).")
+    if head_type == "ctc" and decoder_mode not in {"ctc_viterbi", "koi"}:
+        raise ValueError("CTC head supports --decoder ctc_viterbi, koi, or auto.")
+    if head_type == "ctc_crf" and decoder_mode not in {"ctc_crf", "koi"}:
+        raise ValueError("CTC-CRF head supports --decoder ctc_crf, koi, or auto.")
     if decoder_mode == "ctc_crf":
         if head_type != "ctc_crf":
             raise ValueError("--decoder ctc_crf requires checkpoint/model head_type=ctc_crf.")
@@ -259,10 +291,9 @@ def main():
         model_path=args.model_name_or_path,
         num_classes=head_config["num_classes"],
         hidden_layer=args.hidden_layer,
+        learnable_fuse_last_n_layers=args.learnable_fuse_last_n_layers,
         feature_source=args.feature_source,
-        head_output_activation=args.head_output_activation,
-        head_output_scale=args.head_output_scale,
-        pre_head_type=args.pre_head_type,
+        pre_head_type=pre_head_type,
         pre_head_transformer_nhead=args.pre_head_transformer_nhead,
         head_type=head_type,
         head_crf_blank_score=float(args.ctc_crf_blank_score),
@@ -272,12 +303,14 @@ def main():
     ).to(device)
     model.load_state_dict(sd, strict=False)
     model.eval()
+    _print_model_structure(model)
 
     tokenizer = model.tokenizer  # 你的 BasecallModel 里应有
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as w:
         for read_id, signal_str in tqdm(iter_jsonl_reads(args.jsonl_gz), desc="jsonl->fastq"):
+            signal_str = apply_token_offset_to_signal_str(signal_str, args.token_offset)
             tokens = split_bwav_tokens(signal_str)
             if not tokens:
                 continue
@@ -312,11 +345,11 @@ def main():
                     pred_ids = koi_beam_search_decode(
                         logits_tbc,
                         beam_width=args.beam_width,
-                        beam_cut=args.koi_beam_cut,
-                        scale=args.koi_scale,
-                        offset=args.koi_offset,
-                        blank_score=args.koi_blank_score,
-                        reverse=args.koi_reverse,
+                        beam_cut=100.0,
+                        scale=1.0,
+                        offset=0.0,
+                        blank_score=float(args.ctc_crf_blank_score),
+                        reverse=False,
                         input_lengths=input_lengths,
                     )
                 for ids in pred_ids:

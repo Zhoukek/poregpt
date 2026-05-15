@@ -246,6 +246,8 @@ Size in bytes: 409278582
 
 ![Markdown Logo](./assets/pipline.png)
 
+# Basecall任务
+
 ## 按仓库划分：
 1. 第一阶段tokenizer训练：https://github.com/Zhoukek/poregpt/tree/team-dev
 
@@ -417,15 +419,8 @@ conda activate /mnt/zzbnew/rnamodel/dengjingye/tools/conda/envs/bonito090_py39
 ### step3:dolmo处理
 
 ```
-连接焦老师服务器：
-
-10.200.48.148
-
-jiaoshuai
-
-123abc
-
-conda activate dolma
+dolma环境激活
+conda activate /mnt/zzbnew/rnamodel/zhoukexuan/miniconda3/envs/dolma
 
 /mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/dolma_workflow/run_dolma_tokens_dna595g_vqe340s147000_split1280_overlap256.sh
 
@@ -451,132 +446,6 @@ conda activate dolma
 训练入口：/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/workflows/basecall_workflow/step00_train_ctc_bilstm_0305.sh
 ~~~
 
-基模存放位置(举例)：/mnt/zzbnew/rnamodel/model/signalDNAmodel/HF_20m_DNA_VQE64K_CNN03_V20260203/base
-
-/mnt/zzbnew/rnamodel/zhoukexuan/poregpt/poregpt/basecall/model.py, BasecallModel带basecall head(上面的基模+head)
-~~~
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True
-        )
-
-        if reset_backbone_weights:
-            backbone_config = AutoConfig.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-            )
-            self.backbone = AutoModel.from_config(
-                backbone_config,
-                trust_remote_code=True,
-            )
-        else:
-            self.backbone = AutoModel.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-            )
-        ...
-        
-        if self.head_type == "ctc_crf":
-            n_base = head_crf_n_base if head_crf_n_base is not None else (len(ID2BASE) - 1)
-            if head_crf_state_len is None:
-                if n_base <= 1:
-                    raise ValueError("Cannot infer head_crf_state_len with n_base <= 1.")
-                base = num_classes / (n_base + 1)
-                state_len = math.log(base, n_base) - 1
-                if not math.isclose(state_len, round(state_len)):
-                    raise ValueError("Unable to infer head_crf_state_len from num_classes and n_base.")
-                head_crf_state_len = int(round(state_len))
-            self.base_head = LinearCRFEncoder(
-                insize=self.pre_head.output_dim,
-                n_base=n_base,
-                state_len=head_crf_state_len,
-                bias=True,
-                scale=head_output_scale,
-                activation=head_output_activation,
-                blank_score=head_crf_blank_score,
-                expand_blanks=head_crf_expand_blanks,
-            )
-        elif self.head_type == "ctc":
-            self.base_head = LinearCTCEncoder(
-                insize=self.pre_head.output_dim,
-                num_classes=num_classes,
-                bias=True,
-                scale=head_output_scale,
-                activation=head_output_activation,
-            )
-        else:
-            raise ValueError(f"Unsupported head_type: {self.head_type}")
-~~~
-
-~~~
-BasecallModel的forward，输入的是input_ids：
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if self.feature_source == "embedding":
-            embedding_layer = self.backbone.get_input_embeddings()
-            if embedding_layer is None:
-                raise ValueError("Backbone does not expose input embeddings via get_input_embeddings().")
-            hidden = embedding_layer(input_ids)
-        else:
-            outputs = self.backbone(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-
-            hidden_states = outputs.hidden_states  # tuple(len = n_layers + 1)
-
-            try:
-                hidden = hidden_states[self.hidden_layer]
-            except IndexError:
-                raise ValueError(
-                    f"hidden_layer={self.hidden_layer} out of range "
-                    f"(num hidden states = {len(hidden_states)})"
-                )
-
-        hidden = self.pre_head(hidden)
-        logits_btc = self.base_head(hidden)
-        return logits_btc
-~~~
-
-基座是冻结的，或是解冻最后几层：
-
-~~~
-位于poregpt/basecall/model.py：
-
-        # ✅ 冻结基座（核心）
-        if self.freeze_backbone or self.unfreeze_last_n_layers > 0 or unfreeze_layer_start is not None or unfreeze_layer_end is not None:
-            for p in self.backbone.parameters():
-                p.requires_grad = False
-            if self.freeze_backbone and self.unfreeze_last_n_layers == 0:
-                self.backbone.eval()  # 固定 dropout 等推理行为（推荐）
-
-        # ✅ 可选：仅解冻最后 N 层
-        if self.unfreeze_last_n_layers > 0 or unfreeze_layer_start is not None or unfreeze_layer_end is not None:
-            layers = self._get_transformer_layers()
-            n_layers = len(layers)
-            if unfreeze_layer_start is not None or unfreeze_layer_end is not None:
-                start = 0 if unfreeze_layer_start is None else int(unfreeze_layer_start)
-                end = n_layers if unfreeze_layer_end is None else int(unfreeze_layer_end)
-                if start < 0:
-                    start = n_layers + start
-                if end < 0:
-                    end = n_layers + end
-                if not 0 <= start <= end <= n_layers:
-                    raise ValueError(f"Invalid unfreeze layer range: [{start}, {end}) with {n_layers} layers.")
-                target_layers = layers[start:end]
-            else:
-                n_unfreeze = min(self.unfreeze_last_n_layers, n_layers)
-                target_layers = layers[-n_unfreeze:]
-            for layer in target_layers:
-                for p in layer.parameters():
-                    p.requires_grad = True
-~~~
-
 **PS：三阶段所用数据集：**
 
 model_name="HF_20m_DNA_VQE64K_CNN03_V20260203"
@@ -585,3 +454,11 @@ data_root="/mnt/zzbnew/rnamodel/model/signalDNAmodel/${model_name}/basecall"
 
 以这个为例子：大小1.1G
 
+# 碱基修饰任务
+
+修饰任务所需步骤：
+
+1. 纳米孔电信号和参考碱基序列进行对齐
+2. 修饰检测模型训练
+
+## 数据集位置：

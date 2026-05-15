@@ -39,8 +39,25 @@ from .data_multifolder import (
 from .ctc_crf import decode as ctc_crf_decode
 from .metrics import ctc_viterbi_decode, koi_beam_search_decode, batch_bonito_accuracy, cal_bonito_accuracy, parasail_error_counts
 from .model import BasecallModel
-from .utils import ID2BASE, BLANK_IDX, seed_everything, infer_head_config_from_state_dict, resolve_input_lengths
+from .utils import (
+    ID2BASE,
+    BLANK_IDX,
+    seed_everything,
+    infer_head_config_from_state_dict,
+    infer_pre_head_type_from_state_dict,
+    resolve_input_lengths,
+)
 from .callback import plot_alignment_heatmap, plot_aligned_heatmap_png, align_sequences_indel_aware
+
+
+def _print_model_structure(model: torch.nn.Module, *, prefix: str = "[Model]") -> None:
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"{prefix} class={model.__class__.__name__}")
+    print(f"{prefix} pre_head={model.pre_head.__class__.__name__} head={model.base_head.__class__.__name__}")
+    print(f"{prefix} params total={total_params:,} trainable={trainable_params:,}")
+    print(f"{prefix} structure:")
+    print(model)
 
 
 def _parse_cigar(cigar: str) -> List[str]:
@@ -64,6 +81,18 @@ def merge_counts(total: Dict[str, int], item: Dict[str, int]) -> Dict[str, int]:
     for k in total:
         total[k] += item.get(k, 0)
     return total
+
+
+def _rebuild_target_seqs(target_labels: torch.Tensor, target_lengths: torch.Tensor) -> List[List[int]]:
+    labels = target_labels.detach().cpu().tolist()
+    lengths = target_lengths.detach().cpu().tolist()
+    out: List[List[int]] = []
+    offset = 0
+    for ln in lengths:
+        ln_i = int(ln)
+        out.append([int(x) for x in labels[offset: offset + ln_i]])
+        offset += ln_i
+    return out
 
 
 def counts_to_ratio(counts: Dict[str, int]) -> Dict[str, float]:
@@ -239,21 +268,13 @@ def main() -> None:
                     help="Comma-separated folders or tokens_*.npy/reference_*.npy files (uses token/reference pairs).")
     ap.add_argument("--recursive", action="store_true",
                     help="Scan subfolders for .jsonl.gz or tokens/reference .npy inputs.")
+    ap.add_argument("--token_offset", type=int, default=0,
+                    help="Add this offset to each <|bwav:ID|> token in input signal_str (e.g. 0->128).")
     ap.add_argument("--model_name_or_path", required=True)
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--beam_width", type=int, default=32)
-    ap.add_argument("--koi_beam_cut", type=float, default=100.0,
-                    help="Beam cut value for Koi beam_search decoding.")
-    ap.add_argument("--koi_scale", type=float, default=1.0,
-                    help="Scale applied to scores for Koi beam_search decoding.")
-    ap.add_argument("--koi_offset", type=float, default=0.0,
-                    help="Offset applied to scores for Koi beam_search decoding.")
-    ap.add_argument("--koi_blank_score", type=float, default=2.0,
-                    help="Blank score used for Koi beam_search decoding.")
     ap.add_argument("--ctc_crf_blank_score", type=float, default=2.0,
                     help="Blank score used by CTC-CRF head logits (keep consistent with training).")
-    ap.add_argument("--koi_reverse", action="store_true",
-                    help="Reverse sequence output for Koi beam_search decoding.")
     ap.add_argument("--decoder", choices=["auto", "ctc_viterbi", "koi", "ctc_crf"], default="auto",
                     help="Decoder to use. auto picks ctc_viterbi for CTC head and ctc_crf for CTC-CRF head.")
     ap.add_argument("--head_type", choices=["ctc", "ctc_crf"], default=None,
@@ -269,14 +290,12 @@ def main() -> None:
     ap.add_argument("--fastq_q", type=int, default=20)
     ap.add_argument("--hidden_layer", type=int, default=-1,
                     help="Which backbone hidden layer to use when --feature_source hidden.")
+    ap.add_argument("--learnable_fuse_last_n_layers", type=int, default=0,
+                    help="If >0, learn a softmax-weighted fusion over the last N hidden layers (overrides --hidden_layer).")
     ap.add_argument("--feature_source", "--feature-source", choices=["hidden", "embedding"], default="hidden",
                     help="Use transformer hidden states or input embeddings as head input features.")
-    ap.add_argument("--head_output_activation", choices=["tanh", "relu"], default=None,
-                    help="Optional activation applied to head output logits.")
-    ap.add_argument("--head_output_scale", type=float, default=None,
-                    help="Optional scalar applied to head output logits (after activation).")
-    ap.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer"], default="none",
-                    help="Optional module before CTC-CRF head.")
+    ap.add_argument("--pre_head_type", choices=["auto", "none", "bilstm", "transformer", "tcn"], default="auto",
+                    help="Optional module before CTC-CRF head. Default auto-infers from checkpoint.")
     ap.add_argument("--pre_head_transformer_nhead", type=int, default=8,
                     help="Attention heads for --pre_head_type transformer.")
     ap.add_argument("--acc_balanced", action="store_true",
@@ -284,6 +303,8 @@ def main() -> None:
     ap.add_argument("--acc_min_coverage", type=float, default=0.0,
                     help="Minimum reference coverage required to count a read for accuracy.")
     args = ap.parse_args()
+    if args.token_offset < 0:
+        raise ValueError("--token_offset must be >= 0")
 
     seed_everything(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -296,7 +317,7 @@ def main() -> None:
         npy_pairs = scan_npy_pairs(npy_paths, group_by="file", recursive=args.recursive)
         if not npy_pairs:
             raise ValueError(f"No tokens/reference npy files found under: {args.npy_paths}")
-        dataset = MultiNpySignalRefDataset(npy_pairs)
+        dataset = MultiNpySignalRefDataset(npy_pairs, token_offset=args.token_offset)
     else:
         if not args.jsonl_paths:
             raise ValueError("Provide --jsonl_paths or --npy_paths.")
@@ -304,19 +325,31 @@ def main() -> None:
         jsonl_files = scan_jsonl_files(jsonl_paths, group_by="file", recursive=args.recursive)
         if not jsonl_files:
             raise ValueError(f"No jsonl files found under: {args.jsonl_paths}")
-        dataset = MultiJsonlSignalRefDataset(jsonl_files)
+        dataset = MultiJsonlSignalRefDataset(jsonl_files, token_offset=args.token_offset)
 
     state_dict = load_checkpoint_state(args.ckpt)
     head_config = infer_head_config_from_state_dict(state_dict)
+    inferred_pre_head_type = infer_pre_head_type_from_state_dict(state_dict)
     head_type = args.head_type or head_config.get("head_type", "ctc")
+    pre_head_type = args.pre_head_type
+    if pre_head_type == "auto":
+        pre_head_type = inferred_pre_head_type
+        print(f"[Model] pre_head_type auto -> {pre_head_type}")
+    elif pre_head_type != inferred_pre_head_type:
+        print(
+            "[Model][Warning] --pre_head_type overrides checkpoint inference: "
+            f"arg={pre_head_type}, inferred={inferred_pre_head_type}"
+        )
     n_base = len(ID2BASE) - 1
     state_len = args.ctc_crf_state_len
     decoder_mode = args.decoder
     if decoder_mode == "auto":
         decoder_mode = "ctc_viterbi" if head_type == "ctc" else "ctc_crf"
 
-    if head_type == "ctc" and decoder_mode not in {"ctc_viterbi"}:
-        raise ValueError("CTC head supports only --decoder ctc_viterbi (or auto).")
+    if head_type == "ctc" and decoder_mode not in {"ctc_viterbi", "koi"}:
+        raise ValueError("CTC head supports --decoder ctc_viterbi, koi, or auto.")
+    if head_type == "ctc_crf" and decoder_mode not in {"ctc_crf", "koi"}:
+        raise ValueError("CTC-CRF head supports --decoder ctc_crf, koi, or auto.")
     if decoder_mode == "ctc_crf":
         if head_type != "ctc_crf":
             raise ValueError("--decoder ctc_crf requires checkpoint/model head_type=ctc_crf.")
@@ -331,10 +364,9 @@ def main() -> None:
         model_path=args.model_name_or_path,
         num_classes=head_config["num_classes"],
         hidden_layer=args.hidden_layer,
+        learnable_fuse_last_n_layers=args.learnable_fuse_last_n_layers,
         feature_source=args.feature_source,
-        head_output_activation=args.head_output_activation,
-        head_output_scale=args.head_output_scale,
-        pre_head_type=args.pre_head_type,
+        pre_head_type=pre_head_type,
         pre_head_transformer_nhead=args.pre_head_transformer_nhead,
         head_type=head_type,
         head_crf_blank_score=float(args.ctc_crf_blank_score),
@@ -344,6 +376,7 @@ def main() -> None:
     ).to(device)
     model.load_state_dict(state_dict, strict=False)
     model.eval()
+    _print_model_structure(model)
 
     collate_fn = create_collate_fn(model.tokenizer)
     loader = DataLoader(
@@ -395,14 +428,17 @@ def main() -> None:
             pred_ids = koi_beam_search_decode(
                 logits_tbc,
                 beam_width=args.beam_width,
-                beam_cut=args.koi_beam_cut,
-                scale=args.koi_scale,
-                offset=args.koi_offset,
-                blank_score=args.koi_blank_score,
-                reverse=args.koi_reverse,
+                beam_cut=100.0,
+                scale=1.0,
+                offset=0.0,
+                blank_score=float(args.ctc_crf_blank_score),
+                reverse=False,
                 input_lengths=input_lengths,
             )
-        ref_ids = batch["target_seqs"]
+        ref_ids = _rebuild_target_seqs(
+            batch["target_labels"].to(device),
+            batch["target_lengths"].to(device),
+        )
 
         acc = batch_bonito_accuracy(
             pred_ids,
